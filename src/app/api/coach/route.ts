@@ -41,6 +41,7 @@ export async function POST(request: Request) {
       { data: goals },
       { data: remittances },
       { data: splitGroups },
+      { data: customCats },
     ] = await Promise.all([
       supabase.from("profiles").select("*").eq("id", user.id).single(),
       supabase.from("accounts").select("*"),
@@ -49,7 +50,11 @@ export async function POST(request: Request) {
       supabase.from("savings_goals").select("*"),
       supabase.from("remittances").select("*").gte("date", monthStart),
       supabase.from("split_groups").select("*, split_members(*)"),
+      supabase.from("custom_categories").select("slug, name"),
     ]);
+
+    const catNameMap = new Map<string, string>();
+    (customCats || []).forEach((c: any) => catNameMap.set(c.slug, c.name));
 
     const totalExpenses = (transactions || [])
       .filter((t: any) => t.type === "expense")
@@ -58,11 +63,13 @@ export async function POST(request: Request) {
       .filter((t: any) => t.type === "income")
       .reduce((s: number, t: any) => s + t.amount, 0);
 
+    const resolveCatName = (slug: string) => catNameMap.get(slug) || slug;
+
     const budgetSummary = (budgets || []).map((b: any) => {
       const spent = (transactions || [])
         .filter((t: any) => t.type === "expense" && t.category === b.category)
         .reduce((s: number, t: any) => s + t.amount, 0);
-      return `${b.category}: spent ${spent}/${b.monthly_limit} ${b.currency}`;
+      return `${resolveCatName(b.category)}: spent ${spent}/${b.monthly_limit} ${b.currency}`;
     }).join("; ");
 
     const goalSummary = (goals || []).map((g: any) =>
@@ -73,13 +80,29 @@ export async function POST(request: Request) {
       ? `Sent ${remittances!.length} transfers this month totaling ${remittances!.reduce((s: number, r: any) => s + r.amount_sent, 0)} ${remittances![0]?.from_currency}`
       : "No remittances this month";
 
+    // Build per-category spending for richer context
+    const catSpending: Record<string, number> = {};
+    (transactions || []).filter((t: any) => t.type === "expense").forEach((t: any) => {
+      const name = resolveCatName(t.category);
+      catSpending[name] = (catSpending[name] || 0) + t.amount;
+    });
+    const topSpending = Object.entries(catSpending)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 8)
+      .map(([cat, amt]) => `${cat}: ${amt}`)
+      .join(", ");
+
+    const customCatNames = (customCats || []).map((c: any) => c.name);
+
     const context = `User: ${profile?.display_name || "User"}, primary currency: ${profile?.primary_currency || "USD"}
 Accounts: ${(accounts || []).map((a: any) => `${a.name} (${a.currency}): ${a.initial_balance}`).join(", ") || "None"}
 This month: Income ${totalIncome}, Expenses ${totalExpenses}
+Top spending categories: ${topSpending || "None"}
 Budgets: ${budgetSummary || "None set"}
 Goals: ${goalSummary || "None"}
 Remittances: ${remittanceSummary}
-Split groups: ${(splitGroups || []).length} active`;
+Split groups: ${(splitGroups || []).length} active
+Custom categories: ${customCatNames.length > 0 ? customCatNames.join(", ") : "None"}`;
 
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
     const chatCompletion = await groq.chat.completions.create({

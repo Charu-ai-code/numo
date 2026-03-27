@@ -8,11 +8,12 @@ Numo is a dual-currency budgeting web app for young professionals managing finan
 
 - **Dual-Currency Native** — Track, categorize, and report in INR and USD simultaneously
 - **Multi-Account Management** — Bank accounts, credit cards, digital wallets, crypto — all in one place
-- **Transaction Tracking** — Log expenses and income with categories, search, filters, and recurring support
+- **Transaction Tracking** — Log expenses and income with categories, search, filters (including category filters), and recurring support
+- **Custom Categories** — Create your own expense/income categories with colors and icons; keyword mappings learn from your edits
 - **Budgets** — Set monthly spending limits per category with visual progress (green → amber → coral)
 - **Savings Goals** — Visual progress rings, preset templates, contribution tracking, goal-at-risk alerts
 - **Remittance Tracker** — Track money sent between countries with exchange rate history
-- **Bill Splitting** — Create groups, split expenses, settle up, and sync with Splitwise via OAuth
+- **Bill Splitting** — Create groups, split expenses, settle up, **Splitwise OAuth sync**, and push new expenses to Splitwise for linked groups
 - **AI Coach** — Conversational budgeting assistant powered by Groq (llama-3.3-70b-versatile)
 - **AI Nudges** — Daily proactive insights on your dashboard, specific to your numbers
 - **1% Magic Calculator** — See how small savings compound over time
@@ -69,6 +70,10 @@ SPLITWISE_CLIENT_SECRET=your_splitwise_consumer_secret
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 ```
 
+Optional:
+
+- `SPLITWISE_API_KEY` — Splitwise API key (used if no user OAuth token); omit for OAuth-only.
+
 ### 3. Create database tables
 
 1. Go to your Supabase project dashboard
@@ -76,15 +81,30 @@ NEXT_PUBLIC_APP_URL=http://localhost:3000
 3. Paste the contents of `supabase/schema.sql`
 4. Click **Run**
 
-This creates all 14 tables, indexes, RLS policies, and the auto-profile trigger.
+This creates the core tables, indexes, RLS policies, and the auto-profile trigger.
 
-### 4. Configure Splitwise (optional)
+### 4. Apply incremental migrations
+
+After the base schema, run these in the SQL Editor **in order** (each file is idempotent where noted):
+
+| File | Purpose |
+|------|---------|
+| `supabase/migration_custom_categories.sql` | `custom_categories` and `category_mappings` tables + RLS |
+| `supabase/migration_split_transactions.sql` | Split ↔ transactions, Splitwise IDs, `profiles.default_account_id`, sync timestamp |
+| `supabase/migration_splitwise_settlements.sql` | `split_settlements.splitwise_expense_id` + optional cleanup of old bad rows |
+| `supabase/migration_split_groups_simplified_debts.sql` | `split_groups.simplified_debts` (canonical Splitwise balances) |
+
+Alternatively, run the single consolidated script **`supabase/migration_consolidated_all.sql`** once (additive schema only; optional data cleanup is commented at the bottom).
+
+### 5. Configure Splitwise (optional)
 
 1. Go to https://secure.splitwise.com/apps
 2. Create or edit your app
-3. Set the callback URL to `http://localhost:3000/api/splitwise/callback`
+3. Set the callback URL to `http://localhost:3000/api/splitwise/callback` (or your deployed URL + `/api/splitwise/callback`)
 
-### 5. Run the dev server
+**Behavior summary:** Debts for Splitwise-linked groups use **`simplified_debts`** from Splitwise (`GET /get_groups`), not a sum of local history. Regular shared expenses still sync into Numo and can create **your-share** transactions. Payment / “settle all balances” rows are stored as **settlements**, not as spending transactions. Adding an expense in Numo for a linked group can **push** to Splitwise via the API.
+
+### 6. Run the dev server
 
 ```bash
 npm run dev
@@ -98,28 +118,33 @@ Open [http://localhost:3000](http://localhost:3000).
 src/
   app/
     (auth)/           # Login, signup, forgot-password, onboarding
-    (app)/            # Main app (dashboard, accounts, transactions, etc.)
-    api/              # API routes (coach, nudge, exchange-rate, splitwise)
+    (app)/            # Main app (dashboard, accounts, transactions, budgets, split, etc.)
+    api/              # coach, nudge, exchange-rate, splitwise (auth, callback, sync, push-expense), transactions (smart-categorize)
     auth/callback/    # OAuth callback handler
   components/
-    ui/               # Reusable primitives (Button, Card, Modal, etc.)
+    ui/               # Reusable primitives (Button, Card, Modal, CategoryPicker, …)
     providers/        # React Query provider
   lib/
     supabase/         # Client, server, and service role clients
-    hooks/            # Custom React hooks
+    hooks/            # Custom React hooks (accounts, categories, …)
     stores/           # Zustand stores
     constants.ts      # Categories, templates, enums
+    splitwise-debts.ts
+    splitwise-settlement.ts
+    smart-categorize.ts
     utils.ts          # Formatters, currency helpers
   middleware.ts       # Auth route protection
 supabase/
-  schema.sql          # Complete database schema
+  schema.sql                    # Full baseline schema
+  migration_*.sql               # Incremental migrations
+  migration_consolidated_all.sql
 ```
 
 ## Database Schema
 
-14 tables with Row Level Security:
+Core tables (with Row Level Security) include:
 
-`profiles` · `accounts` · `transactions` · `budgets` · `savings_goals` · `goal_contributions` · `remittances` · `split_groups` · `split_members` · `split_expenses` · `split_shares` · `split_settlements` · `ai_nudges` · `exchange_rates`
+`profiles` · `accounts` · `transactions` · `budgets` · `savings_goals` · `goal_contributions` · `remittances` · `split_groups` · `split_members` · `split_expenses` · `split_shares` · `split_settlements` · `custom_categories` · `category_mappings` · `ai_nudges` · `exchange_rates`
 
 ## License
 

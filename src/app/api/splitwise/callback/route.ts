@@ -66,7 +66,7 @@ export async function GET(request: Request) {
       console.error("Splitwise callback: no authenticated user");
     }
 
-    return NextResponse.redirect(new URL("/split", appUrl));
+    return NextResponse.redirect(new URL("/split?connected=true", appUrl));
   } catch (err) {
     console.error("Splitwise callback error:", err);
     return NextResponse.redirect(new URL("/split?error=auth_failed", appUrl));

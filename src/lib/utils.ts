@@ -78,3 +78,12 @@ export function truncate(str: string, length: number): string {
   if (str.length <= length) return str;
   return str.slice(0, length) + "...";
 }
+
+export function resolveDefaultAccount(
+  profile: { default_account_id: string | null } | null,
+  accounts: { id: string }[] | null | undefined
+): string | null {
+  if (profile?.default_account_id) return profile.default_account_id;
+  if (accounts && accounts.length === 1) return accounts[0].id;
+  return null;
+}

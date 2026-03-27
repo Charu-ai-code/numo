@@ -1,7 +1,8 @@
 "use client";
 
+import { useEffect } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard,
   ArrowLeftRight,
@@ -11,6 +12,7 @@ import {
   Settings,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useProfile } from "@/lib/hooks/use-profile";
 
 const navItems = [
   { href: "/", label: "Home", icon: LayoutDashboard },
@@ -22,6 +24,14 @@ const navItems = [
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
+  const { data: profile, isLoading: profileLoading } = useProfile();
+
+  useEffect(() => {
+    if (!profileLoading && profile && !profile.onboarding_completed) {
+      router.replace("/onboarding");
+    }
+  }, [profile, profileLoading, router]);
 
   return (
     <div className="min-h-screen pb-20 lg:pb-0 lg:pl-64">

@@ -6,7 +6,7 @@ export type TransactionType = "expense" | "income";
 
 export type SplitMethod = "equal" | "percentage" | "custom";
 
-export type Recurrence = "daily" | "weekly" | "monthly";
+export type Recurrence = "daily" | "weekly" | "biweekly" | "monthly";
 
 export const ACCOUNT_TYPES: {
   value: AccountType;
@@ -109,12 +109,46 @@ export const DAYS_OF_WEEK = [
   "Saturday",
 ];
 
-export function getCategoryIcon(category: string): string {
-  const all = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES];
-  return all.find((c) => c.value === category)?.icon || "Circle";
+export interface CustomCategory {
+  id: string;
+  slug: string;
+  name: string;
+  icon: string;
+  color: string;
+  type: "expense" | "income";
 }
 
-export function getCategoryLabel(category: string): string {
+export const CATEGORY_ICON_OPTIONS = [
+  "Tag", "Car", "Fuel", "ShoppingCart", "Coffee", "Utensils",
+  "Dog", "Heart", "Star", "Gamepad2", "Music", "Dumbbell",
+  "Plane", "Gift", "Baby", "Scissors", "Wrench", "Sparkles",
+  "Pizza", "Wine", "Shirt", "BookOpen", "Tv", "Smartphone",
+];
+
+export const CATEGORY_COLOR_OPTIONS = [
+  "#ffb4ab", "#4edea3", "#b0c6ff", "#e9c349", "#c49bff",
+  "#ff8fab", "#67e8f9", "#fbbf24", "#a3e635", "#f472b6",
+];
+
+export function getCategoryIcon(category: string, customCategories?: CustomCategory[]): string {
   const all = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES];
-  return all.find((c) => c.value === category)?.label || category;
+  const built = all.find((c) => c.value === category);
+  if (built) return built.icon;
+  const custom = customCategories?.find((c) => c.slug === category);
+  if (custom) return custom.icon;
+  return "Circle";
+}
+
+export function getCategoryLabel(category: string, customCategories?: CustomCategory[]): string {
+  const all = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES];
+  const built = all.find((c) => c.value === category);
+  if (built) return built.label;
+  const custom = customCategories?.find((c) => c.slug === category);
+  if (custom) return custom.name;
+  return category;
+}
+
+export function getCategoryColor(category: string, customCategories?: CustomCategory[]): string | null {
+  const custom = customCategories?.find((c) => c.slug === category);
+  return custom?.color || null;
 }

@@ -24,6 +24,15 @@
   ::-webkit-scrollbar-thumb:hover {
     background: rgba(255, 255, 255, 0.2);
   }
+
+  select {
+    color-scheme: dark;
+  }
+
+  option {
+    background-color: #1a1a2e;
+    color: #ffffff;
+  }
 }
 
 @layer components {

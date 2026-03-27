@@ -100,6 +100,7 @@ CREATE TABLE public.split_groups (
   user_id uuid NOT NULL REFERENCES auth.users (id) ON DELETE CASCADE,
   name text NOT NULL,
   splitwise_group_id text,
+  simplified_debts jsonb DEFAULT '[]'::jsonb,
   created_at timestamptz DEFAULT now()
 );
 
@@ -137,8 +138,12 @@ CREATE TABLE public.split_settlements (
   to_member uuid NOT NULL REFERENCES public.split_members (id) ON DELETE CASCADE,
   amount numeric NOT NULL CHECK (amount > 0),
   currency text NOT NULL DEFAULT 'USD' CHECK (currency IN ('USD', 'INR')),
-  date date NOT NULL DEFAULT CURRENT_DATE
+  date date NOT NULL DEFAULT CURRENT_DATE,
+  splitwise_expense_id text
 );
+
+CREATE UNIQUE INDEX idx_split_settlements_sw_expense_id ON public.split_settlements (splitwise_expense_id)
+  WHERE splitwise_expense_id IS NOT NULL;
 
 CREATE TABLE public.ai_nudges (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

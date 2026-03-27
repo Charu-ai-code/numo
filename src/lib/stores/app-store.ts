@@ -11,6 +11,7 @@ interface Profile {
   splitwise_access_token: string | null;
   weekly_summary_day: string;
   avatar_url: string | null;
+  default_account_id: string | null;
 }
 
 interface AppState {

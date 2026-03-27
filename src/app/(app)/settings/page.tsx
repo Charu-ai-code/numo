@@ -13,9 +13,11 @@ import {
   Download,
   LogOut,
   ChevronRight,
+  Wallet,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { useProfile } from "@/lib/hooks/use-profile";
+import { useAccounts } from "@/lib/hooks/use-accounts";
 import { useAppStore } from "@/lib/stores/app-store";
 import { DAYS_OF_WEEK, type Currency } from "@/lib/constants";
 import { getInitials, cn } from "@/lib/utils";
@@ -32,6 +34,7 @@ export default function SettingsPage() {
   const supabase = createClient();
   const qc = useQueryClient();
   const { isLoading } = useProfile();
+  const { data: accounts } = useAccounts();
   const profile = useAppStore((s) => s.profile);
 
   const [showSignOut, setShowSignOut] = useState(false);
@@ -141,6 +144,27 @@ export default function SettingsPage() {
           value={profile.primary_currency as Currency}
           onChange={(c) => updateProfile.mutate({ primary_currency: c })}
         />
+      </Card>
+
+      {/* Default Account for Splits */}
+      <Card className="space-y-3">
+        <div className="flex items-center gap-3">
+          <Wallet className="w-5 h-5 text-muted" />
+          <div>
+            <span className="text-sm">Default Account for Splits</span>
+            <p className="text-xs text-muted">Used when split expenses auto-create transactions</p>
+          </div>
+        </div>
+        <select
+          value={profile.default_account_id || ""}
+          onChange={(e) => updateProfile.mutate({ default_account_id: e.target.value || null })}
+          className="w-full px-4 py-2.5 bg-white/[0.05] border border-white/[0.08] rounded-xl text-sm text-white outline-none [&>option]:bg-surface [&>option]:text-white"
+        >
+          <option value="">Auto-detect</option>
+          {accounts?.map((a: any) => (
+            <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>
+          ))}
+        </select>
       </Card>
 
       {/* Rookie Mode */}

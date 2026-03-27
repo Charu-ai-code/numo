@@ -4,9 +4,10 @@ interface BadgeProps {
   children: React.ReactNode;
   variant?: "default" | "green" | "coral" | "amber" | "blue";
   className?: string;
+  onClick?: (e: React.MouseEvent) => void;
 }
 
-export function Badge({ children, variant = "default", className }: BadgeProps) {
+export function Badge({ children, variant = "default", className, onClick }: BadgeProps) {
   const variants = {
     default: "bg-white/[0.08] text-white/70",
     green: "bg-accent-green/15 text-accent-green",
@@ -17,6 +18,7 @@ export function Badge({ children, variant = "default", className }: BadgeProps) 
 
   return (
     <span
+      onClick={onClick}
       className={cn(
         "inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-md",
         variants[variant],

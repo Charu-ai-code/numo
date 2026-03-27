@@ -57,7 +57,16 @@ export default function LoginPage() {
       return;
     }
 
-    router.push("/");
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("onboarding_completed")
+      .single();
+
+    if (!profile?.onboarding_completed) {
+      router.push("/onboarding");
+    } else {
+      router.push("/");
+    }
     router.refresh();
   }
 

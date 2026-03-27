@@ -16,5 +16,14 @@ export async function GET(request: Request) {
     return NextResponse.redirect(new URL("/login", origin));
   }
 
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("onboarding_completed")
+    .single();
+
+  if (!profile?.onboarding_completed) {
+    return NextResponse.redirect(new URL("/onboarding", origin));
+  }
+
   return NextResponse.redirect(new URL("/", origin));
 }
