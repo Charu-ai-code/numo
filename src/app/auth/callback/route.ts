@@ -1,15 +1,38 @@
-import { createServerSupabaseClient } from "@/lib/supabase/server";
-import { NextResponse } from "next/server";
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
+import { NextResponse, type NextRequest } from "next/server";
 
-export async function GET(request: Request) {
-  const { searchParams, origin } = new URL(request.url);
-  const code = searchParams.get("code");
+/**
+ * OAuth (e.g. Google) returns here with ?code=.
+ * Session cookies must be written onto the same Response as the redirect (see @supabase/ssr).
+ */
+export async function GET(request: NextRequest) {
+  const url = request.nextUrl;
+  const origin = url.origin;
+  const code = url.searchParams.get("code");
 
   if (!code) {
     return NextResponse.redirect(new URL("/login", origin));
   }
 
-  const supabase = createServerSupabaseClient();
+  let redirectResponse = NextResponse.redirect(new URL("/", origin));
+
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() {
+          return request.cookies.getAll();
+        },
+        setAll(cookiesToSet: { name: string; value: string; options: CookieOptions }[]) {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            redirectResponse.cookies.set(name, value, options);
+          });
+        },
+      },
+    }
+  );
+
   const { error } = await supabase.auth.exchangeCodeForSession(code);
 
   if (error) {
@@ -21,9 +44,15 @@ export async function GET(request: Request) {
     .select("onboarding_completed")
     .single();
 
-  if (!profile?.onboarding_completed) {
-    return NextResponse.redirect(new URL("/onboarding", origin));
+  const nextPath = profile?.onboarding_completed ? "/" : "/onboarding";
+  if (nextPath !== "/") {
+    const nextUrl = new URL(nextPath, origin);
+    const withCookies = NextResponse.redirect(nextUrl);
+    redirectResponse.cookies.getAll().forEach((c) => {
+      withCookies.cookies.set(c);
+    });
+    return withCookies;
   }
 
-  return NextResponse.redirect(new URL("/", origin));
+  return redirectResponse;
 }
