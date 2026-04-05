@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -44,9 +44,11 @@ interface PersonDebt {
   groups: string[];
   memberId: string;
   groupId: string;
+  /** Present when row comes from Splitwise GET /get_friends */
+  splitwiseUserId?: string;
 }
 
-export default function SplitPage() {
+function SplitPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const supabase = createClient();
@@ -93,6 +95,7 @@ export default function SplitPage() {
         qc.invalidateQueries({ queryKey: ["split-settlements"] });
         qc.invalidateQueries({ queryKey: ["dashboard-split-settlements"] });
         qc.invalidateQueries({ queryKey: ["transactions"] });
+        qc.invalidateQueries({ queryKey: ["splitwise-friends"] });
       }
     } catch {
       setSyncMsg("Network error during sync");
@@ -147,7 +150,37 @@ export default function SplitPage() {
     enabled: !!groups && groups.length > 0,
   });
 
-  // Compute per-person debts across all groups
+  const {
+    data: splitwiseFriendsPayload,
+    isLoading: splitwiseFriendsLoading,
+    isError: splitwiseFriendsError,
+    error: splitwiseFriendsErrorObj,
+  } = useQuery({
+    queryKey: ["splitwise-friends"],
+    queryFn: async () => {
+      const res = await fetch("/api/splitwise/friends");
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Could not load Splitwise friend balances");
+      }
+      return data as {
+        friends: {
+          splitwiseUserId: string;
+          name: string;
+          email: string | null;
+          net: number;
+          currency: string;
+          groups: string[];
+          memberId: string;
+          groupId: string;
+        }[];
+      };
+    },
+    enabled: isSplitwiseConnected,
+    staleTime: 30_000,
+  });
+
+  // Compute per-person debts across all groups (manual groups + Splitwise group debts only)
   const personDebts = useMemo(() => {
     if (!groups || !allExpenses || !profile) return [];
 
@@ -227,10 +260,37 @@ export default function SplitPage() {
       .sort((a, b) => a.net - b.net);
   }, [groups, allExpenses, allSettlements, profile]);
 
-  const totalIOwe = personDebts
+  /** Matches Splitwise’s friend dashboard (includes non-group + net across groups). */
+  const displayPersonDebts = useMemo((): PersonDebt[] => {
+    if (
+      isSplitwiseConnected &&
+      Array.isArray(splitwiseFriendsPayload?.friends) &&
+      !splitwiseFriendsLoading
+    ) {
+      return splitwiseFriendsPayload!.friends.map((f) => ({
+        name: f.name,
+        email: f.email,
+        net: f.net,
+        currency: (f.currency || profile?.primary_currency || "USD") as Currency,
+        groups: f.groups,
+        memberId: f.memberId,
+        groupId: f.groupId,
+        splitwiseUserId: f.splitwiseUserId,
+      }));
+    }
+    return personDebts;
+  }, [
+    isSplitwiseConnected,
+    splitwiseFriendsPayload,
+    splitwiseFriendsLoading,
+    personDebts,
+    profile?.primary_currency,
+  ]);
+
+  const totalIOwe = displayPersonDebts
     .filter((p) => p.net > 0)
     .reduce((s, p) => s + p.net, 0);
-  const totalOwedToMe = personDebts
+  const totalOwedToMe = displayPersonDebts
     .filter((p) => p.net < 0)
     .reduce((s, p) => s + Math.abs(p.net), 0);
 
@@ -484,7 +544,15 @@ export default function SplitPage() {
       )}
 
       {/* Debt Summary Banner */}
-      {personDebts.length > 0 && (
+      {splitwiseFriendsError && isSplitwiseConnected && (
+        <p className="text-xs text-accent-amber px-0.5">
+          Couldn&apos;t load Splitwise friend totals (
+          {(splitwiseFriendsErrorObj as Error)?.message || "error"}). Showing group-only
+          estimates below.
+        </p>
+      )}
+
+      {displayPersonDebts.length > 0 && (
         <>
           <Card className="flex items-center justify-between">
             <div className="text-center flex-1">
@@ -519,14 +587,29 @@ export default function SplitPage() {
               </p>
             </div>
           </Card>
+          <p className="text-[11px] text-muted leading-relaxed px-0.5 -mt-1">
+            {isSplitwiseConnected && !splitwiseFriendsError ? (
+              <>
+                People rows match Splitwise&apos;s{" "}
+                <span className="text-white/70">friend balances</span> (including non-group
+                expenses). Amounts use each row&apos;s currency when Splitwise reports multiple.
+              </>
+            ) : (
+              <>
+                Manual / fallback view: Numo sums synced <span className="text-white/70">group</span>{" "}
+                debts in <span className="text-white/70">{displayCurrency}</span> only—this can
+                differ from Splitwise&apos;s friend screen if you share non-group expenses.
+              </>
+            )}
+          </p>
 
           {/* Per-Person Debt Cards */}
           <div className="space-y-2">
-            {personDebts.map((p) => {
+            {displayPersonDebts.map((p) => {
               const iOwe = p.net > 0;
               return (
                 <Card
-                  key={p.memberId}
+                  key={p.splitwiseUserId || p.memberId || p.name}
                   className="flex items-center gap-3"
                 >
                   <div className="w-8 h-8 rounded-full bg-accent-blue/20 flex items-center justify-center text-[10px] font-semibold text-accent-blue">
@@ -552,21 +635,29 @@ export default function SplitPage() {
                         {iOwe ? "you owe" : "owes you"}
                       </p>
                     </div>
-                    {iOwe ? (
-                      <button
-                        onClick={() => handlePay(p)}
-                        className="px-2.5 py-1 rounded-lg bg-accent-coral/15 text-accent-coral text-xs font-medium hover:bg-accent-coral/25 transition-colors"
-                      >
-                        Pay
-                      </button>
+                    {p.memberId ? (
+                      iOwe ? (
+                        <button
+                          type="button"
+                          onClick={() => handlePay(p)}
+                          className="px-2.5 py-1 rounded-lg bg-accent-coral/15 text-accent-coral text-xs font-medium hover:bg-accent-coral/25 transition-colors"
+                        >
+                          Pay
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleRemind(p)}
+                          className="px-2.5 py-1 rounded-lg bg-accent-green/15 text-accent-green text-xs font-medium hover:bg-accent-green/25 transition-colors"
+                        >
+                          <Copy className="w-3 h-3 inline mr-1" />
+                          Remind
+                        </button>
+                      )
                     ) : (
-                      <button
-                        onClick={() => handleRemind(p)}
-                        className="px-2.5 py-1 rounded-lg bg-accent-green/15 text-accent-green text-xs font-medium hover:bg-accent-green/25 transition-colors"
-                      >
-                        <Copy className="w-3 h-3 inline mr-1" />
-                        Remind
-                      </button>
+                      <span className="text-[10px] text-muted text-right max-w-[5.5rem]">
+                        Record settlement in Splitwise
+                      </span>
                     )}
                   </div>
                 </Card>
@@ -720,5 +811,21 @@ export default function SplitPage() {
         </form>
       </Modal>
     </div>
+  );
+}
+
+export default function SplitPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="space-y-4 animate-fade-in">
+          <h1 className="text-xl font-semibold">Splits</h1>
+          <ShimmerCard />
+          <ShimmerCard />
+        </div>
+      }
+    >
+      <SplitPageContent />
+    </Suspense>
   );
 }

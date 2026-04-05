@@ -2,6 +2,11 @@
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { createClient } from "@/lib/supabase/client";
+import {
+  computeRunningBalance,
+  type LedgerAccountRow,
+  type LedgerTransactionRow,
+} from "@/lib/account-ledger";
 
 export function useAccounts() {
   const supabase = createClient();
@@ -19,6 +24,23 @@ export function useAccounts() {
   });
 }
 
+/** All transactions for ledger / net worth (amount, type, date, account). */
+export function useAllTransactionsLedger() {
+  const supabase = createClient();
+  return useQuery({
+    queryKey: ["transactions-ledger"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("transactions")
+        .select("id, account_id, amount, type, date, created_at")
+        .order("date", { ascending: true })
+        .order("created_at", { ascending: true });
+      if (error) throw error;
+      return data as LedgerTransactionRow[] & { id: string; account_id: string }[];
+    },
+  });
+}
+
 export function useAccountBalance(accountId: string) {
   const supabase = createClient();
   return useQuery({
@@ -26,20 +48,20 @@ export function useAccountBalance(accountId: string) {
     queryFn: async () => {
       const { data: account } = await supabase
         .from("accounts")
-        .select("initial_balance")
+        .select("id, type, initial_balance, currency")
         .eq("id", accountId)
         .single();
 
       const { data: txns } = await supabase
         .from("transactions")
-        .select("amount, type")
+        .select("amount, type, date, created_at")
         .eq("account_id", accountId);
 
-      let balance = account?.initial_balance || 0;
-      (txns || []).forEach((t: any) => {
-        balance += t.type === "income" ? t.amount : -t.amount;
-      });
-      return balance;
+      if (!account) return 0;
+      return computeRunningBalance(
+        account as LedgerAccountRow,
+        (txns || []) as LedgerTransactionRow[]
+      );
     },
   });
 }
@@ -54,6 +76,9 @@ export function useCreateAccount() {
       type: string;
       currency: string;
       initial_balance: number;
+      credit_limit?: number | null;
+      payment_due_day?: number | null;
+      apr?: number | null;
     }) => {
       const {
         data: { user },
@@ -68,6 +93,38 @@ export function useCreateAccount() {
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["accounts"] });
+      qc.invalidateQueries({ queryKey: ["transactions-ledger"] });
+    },
+  });
+}
+
+export function useUpdateAccount() {
+  const supabase = createClient();
+  const qc = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      id,
+      ...updates
+    }: {
+      id: string;
+      name?: string;
+      initial_balance?: number;
+      credit_limit?: number | null;
+      payment_due_day?: number | null;
+      apr?: number | null;
+    }) => {
+      const { error } = await supabase
+        .from("accounts")
+        .update(updates)
+        .eq("id", id);
+      if (error) throw error;
+    },
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ["accounts"] });
+      qc.invalidateQueries({ queryKey: ["account", vars.id] });
+      qc.invalidateQueries({ queryKey: ["account-balance", vars.id] });
+      qc.invalidateQueries({ queryKey: ["transactions-ledger"] });
     },
   });
 }
@@ -84,6 +141,7 @@ export function useDeleteAccount() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["accounts"] });
       qc.invalidateQueries({ queryKey: ["transactions"] });
+      qc.invalidateQueries({ queryKey: ["transactions-ledger"] });
     },
   });
 }

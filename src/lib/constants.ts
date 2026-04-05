@@ -2,7 +2,11 @@ export type Currency = "USD" | "INR";
 
 export type AccountType = "bank" | "credit_card" | "wallet" | "crypto_wallet";
 
-export type TransactionType = "expense" | "income";
+export type TransactionType =
+  | "expense"
+  | "income"
+  | "transfer_out"
+  | "transfer_in";
 
 export type SplitMethod = "equal" | "percentage" | "custom";
 
@@ -40,54 +44,89 @@ export const INCOME_CATEGORIES = [
   { value: "other_income", label: "Other", icon: "MoreHorizontal" },
 ];
 
-export const GOAL_TEMPLATES = [
+export type GoalTypeSlug =
+  | "send_home"
+  | "emergency"
+  | "travel"
+  | "invest"
+  | "education"
+  | "custom";
+
+export const GOAL_TYPES: { value: GoalTypeSlug; label: string }[] = [
+  { value: "send_home", label: "Send Money Home" },
+  { value: "emergency", label: "Emergency Fund" },
+  { value: "travel", label: "Travel" },
+  { value: "invest", label: "Invest in Stocks" },
+  { value: "education", label: "Education" },
+  { value: "custom", label: "Custom" },
+];
+
+export const GOAL_TEMPLATES: {
+  name: string;
+  target: number;
+  currency: Currency;
+  months: number;
+  icon: string;
+  color: string;
+  goal_type: GoalTypeSlug;
+  is_recurring?: boolean;
+  monthly_target?: number;
+}[] = [
   {
     name: "Emergency Fund",
     target: 10000,
-    currency: "USD" as Currency,
+    currency: "USD",
     months: 12,
     icon: "Shield",
     color: "#4edea3",
+    goal_type: "emergency",
   },
   {
     name: "Travel Home",
     target: 200000,
-    currency: "INR" as Currency,
+    currency: "INR",
     months: 6,
     icon: "Plane",
     color: "#b0c6ff",
+    goal_type: "travel",
   },
   {
     name: "Education / Upskilling",
     target: 5000,
-    currency: "USD" as Currency,
+    currency: "USD",
     months: 18,
     icon: "GraduationCap",
     color: "#e9c349",
+    goal_type: "education",
   },
   {
     name: "Security Deposit",
     target: 3000,
-    currency: "USD" as Currency,
+    currency: "USD",
     months: 6,
     icon: "Key",
     color: "#ffb4ab",
+    goal_type: "custom",
   },
   {
     name: "Tech & Tools",
     target: 1500,
-    currency: "USD" as Currency,
+    currency: "USD",
     months: 3,
     icon: "Laptop",
     color: "#b0c6ff",
+    goal_type: "custom",
   },
   {
     name: "Send Home Savings",
     target: 500000,
-    currency: "INR" as Currency,
+    currency: "INR",
     months: 24,
     icon: "Heart",
     color: "#4edea3",
+    goal_type: "send_home",
+    is_recurring: true,
+    monthly_target: 15000,
   },
 ];
 

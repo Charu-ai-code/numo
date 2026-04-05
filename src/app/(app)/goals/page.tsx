@@ -7,18 +7,24 @@ import {
   Target,
   Sparkles,
   CheckCircle2,
-  Flame,
+  Trash2,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { useAppStore } from "@/lib/stores/app-store";
-import { GOAL_TEMPLATES, type Currency } from "@/lib/constants";
-import { formatCurrency, daysRemaining, cn } from "@/lib/utils";
+import {
+  GOAL_TYPES,
+  type Currency,
+} from "@/lib/constants";
+import {
+  remainingPlanHeadroom,
+  totalMonthlyGoalTargets,
+} from "@/lib/budget-engine";
+import { formatCurrency, daysRemaining } from "@/lib/utils";
 import { Card } from "@/components/ui/card";
 import { FAB } from "@/components/ui/fab";
 import { Modal } from "@/components/ui/modal";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { CurrencyToggle } from "@/components/ui/currency-toggle";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ShimmerCard } from "@/components/ui/shimmer";
 import {
@@ -29,6 +35,12 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
+import { CreateGoalModal } from "@/components/goals/create-goal-modal";
+
+function goalTypeLabel(t: string | null | undefined): string {
+  if (!t) return "Custom";
+  return GOAL_TYPES.find((g) => g.value === t)?.label ?? t;
+}
 
 function ProgressRing({ pct, size = 64, color = "#4edea3" }: { pct: number; size?: number; color?: string }) {
   const radius = (size - 8) / 2;
@@ -57,13 +69,7 @@ export default function GoalsPage() {
 
   const [showCreate, setShowCreate] = useState(false);
   const [showCalc, setShowCalc] = useState(false);
-  const [name, setName] = useState("");
-  const [target, setTarget] = useState("");
-  const [targetDate, setTargetDate] = useState("");
-  const [currency, setCurrency] = useState<Currency>(profile?.primary_currency || "USD");
-  const [formError, setFormError] = useState("");
 
-  // 1% calculator state
   const [calcIncome, setCalcIncome] = useState(String(profile?.monthly_income || 5000));
   const [calcPct, setCalcPct] = useState(3);
 
@@ -76,47 +82,37 @@ export default function GoalsPage() {
     },
   });
 
-  const createGoal = useMutation({
-    mutationFn: async (goal: any) => {
-      const { data: { user } } = await supabase.auth.getUser();
-      const { data, error } = await supabase
-        .from("savings_goals")
-        .insert({ ...goal, user_id: user!.id })
-        .select()
-        .single();
+  const deleteGoal = useMutation({
+    mutationFn: async (goalId: string) => {
+      const { error } = await supabase.from("savings_goals").delete().eq("id", goalId);
+      if (error) throw error;
+    },
+    onSuccess: (_void, goalId) => {
+      qc.invalidateQueries({ queryKey: ["goals"] });
+      qc.removeQueries({ queryKey: ["goal", goalId] });
+      qc.removeQueries({ queryKey: ["goal-contributions", goalId] });
+    },
+  });
+
+  const { data: budgets } = useQuery({
+    queryKey: ["budgets"],
+    queryFn: async () => {
+      const { data, error } = await supabase.from("budgets").select("monthly_limit");
       if (error) throw error;
       return data;
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["goals"] }),
   });
 
-  function selectTemplate(t: typeof GOAL_TEMPLATES[number]) {
-    setName(t.name);
-    setTarget(String(t.target));
-    setCurrency(t.currency);
-    const d = new Date();
-    d.setMonth(d.getMonth() + t.months);
-    setTargetDate(d.toISOString().slice(0, 10));
-  }
+  const totalBudgetLimits =
+    budgets?.reduce((s: number, b: { monthly_limit: number }) => s + Number(b.monthly_limit), 0) ?? 0;
+  const goalTargets = totalMonthlyGoalTargets((goals || []) as any);
+  const planHeadroom = remainingPlanHeadroom(
+    profile?.monthly_income,
+    0,
+    totalBudgetLimits,
+    goalTargets
+  );
 
-  async function handleCreate(e: React.FormEvent) {
-    e.preventDefault();
-    setFormError("");
-    if (!name.trim()) { setFormError("Name is required"); return; }
-    const numTarget = parseFloat(target);
-    if (!numTarget || numTarget <= 0) { setFormError("Target must be > 0"); return; }
-    if (!targetDate || new Date(targetDate) <= new Date()) { setFormError("Target date must be in the future"); return; }
-    try {
-      await createGoal.mutateAsync({
-        name: name.trim(), target_amount: numTarget, currency, target_date: targetDate,
-        icon: "Target", color: "#4edea3",
-      });
-      setShowCreate(false);
-      setName(""); setTarget(""); setTargetDate("");
-    } catch (err: any) { setFormError(err.message); }
-  }
-
-  // 1% calc data
   const monthly = (parseFloat(calcIncome) || 0) * (calcPct / 100);
   const calcData = Array.from({ length: 11 }, (_, i) => {
     const years = i;
@@ -155,30 +151,54 @@ export default function GoalsPage() {
       ) : (
         <div className="grid grid-cols-2 gap-3">
           {goals.map((g: any) => {
-            const pct = g.target_amount > 0 ? (g.current_balance / g.target_amount) * 100 : 0;
-            const days = daysRemaining(g.target_date);
-            const completed = g.is_completed || pct >= 100;
-            const monthsLeft = Math.max(1, days / 30);
-            const neededPerMonth = (g.target_amount - g.current_balance) / monthsLeft;
-            const atRisk = !completed && pct < (100 - (days / (daysRemaining(g.target_date) || 1)) * 100) * 0.5;
+            const hasCap = g.target_amount != null && g.target_amount > 0;
+            const pct = hasCap ? (g.current_balance / g.target_amount) * 100 : 0;
+            const days = g.target_date ? daysRemaining(g.target_date) : 9999;
+            const completed = g.is_completed || (hasCap && pct >= 100);
+            const atRisk = hasCap && !completed && pct < 30 && days < 60;
 
             return (
               <Card
                 key={g.id}
                 hover
-                className="flex flex-col items-center text-center cursor-pointer py-5"
+                className="relative flex flex-col items-center text-center cursor-pointer py-5"
                 onClick={() => router.push(`/goals/${g.id}`)}
               >
-                <ProgressRing pct={pct} color={completed ? "#4edea3" : atRisk ? "#e9c349" : g.color || "#4edea3"} />
-                <p className="text-sm font-medium mt-3 truncate w-full px-2">
+                <button
+                  type="button"
+                  className="absolute top-2 right-2 z-10 p-1.5 rounded-lg text-muted hover:text-accent-coral hover:bg-white/[0.06] transition-colors"
+                  aria-label={`Delete ${g.name}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (
+                      !confirm(
+                        "Delete this goal? Contribution history will be removed. Remittances stay in your log but will no longer be linked to this goal."
+                      )
+                    ) {
+                      return;
+                    }
+                    deleteGoal.mutate(g.id);
+                  }}
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+                <ProgressRing pct={hasCap ? pct : 0} color={completed ? "#4edea3" : atRisk ? "#e9c349" : g.color || "#4edea3"} />
+                <p className="text-[10px] text-muted uppercase tracking-wide mt-2">
+                  {goalTypeLabel(g.goal_type)}
+                </p>
+                <p className="text-sm font-medium mt-1 truncate w-full px-2">
                   {completed && <CheckCircle2 className="w-3.5 h-3.5 inline text-accent-green mr-1" />}
                   {g.name}
                 </p>
                 <p className="font-number text-xs text-muted mt-1">
-                  {formatCurrency(g.current_balance, g.currency, true)} / {formatCurrency(g.target_amount, g.currency, true)}
+                  {hasCap
+                    ? `${formatCurrency(g.current_balance, g.currency, true)} / ${formatCurrency(g.target_amount, g.currency, true)}`
+                    : g.is_recurring && g.monthly_target
+                      ? `${formatCurrency(g.monthly_target, g.currency, true)}/mo`
+                      : "—"}
                 </p>
                 <p className="text-[10px] text-muted mt-1">
-                  {completed ? "Completed" : `${days} days left`}
+                  {completed ? "Completed" : hasCap ? `${days} days left` : "Monthly commitment"}
                 </p>
               </Card>
             );
@@ -188,38 +208,13 @@ export default function GoalsPage() {
 
       <FAB onClick={() => setShowCreate(true)} />
 
-      {/* Create Goal Modal */}
-      <Modal open={showCreate} onClose={() => setShowCreate(false)} title="New Goal">
-        <div className="space-y-4">
-          <div>
-            <p className="text-xs text-muted mb-2">Quick templates</p>
-            <div className="grid grid-cols-2 gap-1.5">
-              {GOAL_TEMPLATES.map((t) => (
-                <button key={t.name} type="button" onClick={() => selectTemplate(t)}
-                  className={cn("px-3 py-2 rounded-lg text-xs text-left border transition-all",
-                    name === t.name ? "bg-accent-blue/15 text-accent-blue border-accent-blue/30" : "bg-white/[0.03] text-muted border-white/[0.04]"
-                  )}>
-                  {t.name}
-                </button>
-              ))}
-            </div>
-          </div>
-          <form onSubmit={handleCreate} className="space-y-4">
-            <Input label="Goal Name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g., Emergency Fund" />
-            <div className="flex gap-3 items-end">
-              <div className="flex-1">
-                <Input label="Target Amount" type="number" step="0.01" value={target} onChange={(e) => setTarget(e.target.value)} className="font-number" />
-              </div>
-              <CurrencyToggle value={currency} onChange={setCurrency} />
-            </div>
-            <Input label="Target Date" type="date" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} />
-            {formError && <p className="text-sm text-accent-coral">{formError}</p>}
-            <Button type="submit" className="w-full" loading={createGoal.isPending}>Create Goal</Button>
-          </form>
-        </div>
-      </Modal>
+      <CreateGoalModal
+        open={showCreate}
+        onClose={() => setShowCreate(false)}
+        planHeadroom={planHeadroom}
+        primaryCurrency={(profile?.primary_currency as Currency) || "USD"}
+      />
 
-      {/* 1% Magic Calculator */}
       <Modal open={showCalc} onClose={() => setShowCalc(false)} title="1% Magic Calculator">
         <div className="space-y-4">
           <Input label="Monthly Income" type="number" value={calcIncome} onChange={(e) => setCalcIncome(e.target.value)} className="font-number" />

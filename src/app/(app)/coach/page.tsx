@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, Suspense } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import { Send, Loader2, Bot, User } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { Card } from "@/components/ui/card";
 
 interface Message {
   id: string;
@@ -19,11 +19,26 @@ const SUGGESTIONS = [
   "What should I do with extra money this month?",
 ];
 
-export default function CoachPage() {
+const ADJUST_PREFILL =
+  "My budgets plus my recurring savings goals add up to more than my monthly income. Using my actual numbers in context, suggest 2–3 specific tweaks (which budget or goal to trim and by roughly how much).";
+
+function CoachChat() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const adjustApplied = useRef(false);
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (adjustApplied.current) return;
+    if (searchParams.get("adjust") !== "1") return;
+    adjustApplied.current = true;
+    setInput(ADJUST_PREFILL);
+    router.replace("/coach", { scroll: false });
+  }, [searchParams, router]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -84,6 +99,7 @@ export default function CoachPage() {
               {SUGGESTIONS.map((s) => (
                 <button
                   key={s}
+                  type="button"
                   onClick={() => sendMessage(s)}
                   className="block w-full text-left px-4 py-2.5 bg-white/[0.04] border border-white/[0.06] rounded-xl text-sm text-muted hover:text-white hover:bg-white/[0.06] transition-colors"
                 >
@@ -150,5 +166,19 @@ export default function CoachPage() {
         </button>
       </form>
     </div>
+  );
+}
+
+export default function CoachPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex flex-col h-[calc(100vh-8rem)] animate-fade-in justify-center items-center text-muted text-sm">
+          Loading coach…
+        </div>
+      }
+    >
+      <CoachChat />
+    </Suspense>
   );
 }

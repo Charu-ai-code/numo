@@ -67,6 +67,8 @@ export default function OnboardingPage() {
           monthly_income: parsedIncome,
           rookie_mode: rookieMode,
           onboarding_completed: true,
+          budget_mode: "observing",
+          budget_observation_started_at: new Date().toISOString(),
         },
         { onConflict: "id" }
       );

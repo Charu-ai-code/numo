@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   LineChart,
@@ -25,10 +26,11 @@ import { CurrencyToggle } from "@/components/ui/currency-toggle";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ShimmerCard } from "@/components/ui/shimmer";
 
-export default function RemittancesPage() {
+function RemittancesPageInner() {
   const supabase = createClient();
   const qc = useQueryClient();
   const profile = useAppStore((s) => s.profile);
+  const searchParams = useSearchParams();
 
   const [showAdd, setShowAdd] = useState(false);
   const [amountSent, setAmountSent] = useState("");
@@ -39,6 +41,15 @@ export default function RemittancesPage() {
   const [recipientLabel, setRecipientLabel] = useState("");
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [formError, setFormError] = useState("");
+
+  useEffect(() => {
+    const raw = searchParams.get("amount");
+    if (raw == null || raw === "") return;
+    const n = parseFloat(raw);
+    if (!Number.isFinite(n) || n <= 0) return;
+    setAmountSent(String(n));
+    setShowAdd(true);
+  }, [searchParams]);
 
   const { data: remittances, isLoading } = useQuery({
     queryKey: ["remittances"],
@@ -53,17 +64,69 @@ export default function RemittancesPage() {
   });
 
   const addRemittance = useMutation({
-    mutationFn: async (rem: any) => {
-      const { data: { user } } = await supabase.auth.getUser();
+    mutationFn: async (rem: {
+      amount_sent: number;
+      from_currency: Currency;
+      to_currency: Currency;
+      exchange_rate: number;
+      amount_received: number;
+      method: string;
+      recipient_label: string;
+      date: string;
+    }) => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) throw new Error("Not signed in");
+
+      const { data: homeGoal } = await supabase
+        .from("savings_goals")
+        .select("id, current_balance")
+        .eq("user_id", user.id)
+        .eq("goal_type", "send_home")
+        .maybeSingle();
+
+      const insertPayload: Record<string, unknown> = {
+        ...rem,
+        user_id: user.id,
+      };
+      if (homeGoal?.id) {
+        insertPayload.goal_id = homeGoal.id;
+      }
+
       const { data, error } = await supabase
         .from("remittances")
-        .insert({ ...rem, user_id: user!.id })
+        .insert(insertPayload)
         .select()
         .single();
       if (error) throw error;
+
+      if (homeGoal?.id) {
+        const nextBal =
+          Number(homeGoal.current_balance || 0) + rem.amount_sent;
+        await supabase
+          .from("savings_goals")
+          .update({ current_balance: nextBal })
+          .eq("id", homeGoal.id);
+        await supabase.from("goal_contributions").insert({
+          goal_id: homeGoal.id,
+          user_id: user.id,
+          amount: rem.amount_sent,
+          date: rem.date,
+        });
+      }
+
       return data;
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["remittances"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["remittances"] });
+      qc.invalidateQueries({ queryKey: ["goals"] });
+      qc.invalidateQueries({ queryKey: ["goal-contributions"] });
+      qc.invalidateQueries({ queryKey: ["goal-contributions-month-dash"] });
+      qc.invalidateQueries({ queryKey: ["goal-contributions-month"] });
+      qc.invalidateQueries({ queryKey: ["goal-remittances"] });
+      qc.invalidateQueries({ queryKey: ["goal"] });
+    },
   });
 
   const now = new Date();
@@ -181,7 +244,14 @@ export default function RemittancesPage() {
             {remittances.map((r: any) => (
               <Card key={r.id} className="flex items-center justify-between py-3">
                 <div>
-                  <p className="text-sm">{r.recipient_label}</p>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="text-sm">{r.recipient_label}</p>
+                    {r.goal_id && (
+                      <Badge variant="green" className="text-[10px]">
+                        Send Home goal
+                      </Badge>
+                    )}
+                  </div>
                   <p className="text-xs text-muted">{r.method} &middot; {formatDateShort(r.date)}</p>
                 </div>
                 <div className="text-right">
@@ -231,5 +301,20 @@ export default function RemittancesPage() {
         </form>
       </Modal>
     </div>
+  );
+}
+
+export default function RemittancesPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="space-y-4 animate-fade-in p-1">
+          <ShimmerCard />
+          <ShimmerCard />
+        </div>
+      }
+    >
+      <RemittancesPageInner />
+    </Suspense>
   );
 }

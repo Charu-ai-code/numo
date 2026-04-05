@@ -4,6 +4,15 @@ import { NextResponse, type NextRequest } from "next/server";
 const publicPaths = ["/login", "/signup", "/forgot-password"];
 
 export async function middleware(request: NextRequest) {
+  const path = request.nextUrl.pathname;
+  if (
+    path.startsWith("/_next/") ||
+    path.startsWith("/api/") ||
+    path === "/favicon.ico"
+  ) {
+    return NextResponse.next();
+  }
+
   let response = NextResponse.next({ request: { headers: request.headers } });
 
   const supabase = createServerClient(
@@ -36,7 +45,6 @@ export async function middleware(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  const path = request.nextUrl.pathname;
   const isPublic = publicPaths.some((p) => path.startsWith(p));
   const isOnboarding = path.startsWith("/onboarding");
 
@@ -52,5 +60,7 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|api).*)"],
+  matcher: [
+    "/((?!api|_next/static|_next/image|favicon.ico|.*\\..*).*)",
+  ],
 };

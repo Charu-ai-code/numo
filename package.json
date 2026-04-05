@@ -3,9 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "dev": "cross-env NEXT_DIST_DIR=.next-build next dev",
+    "dev:dotnext": "node scripts/unlock-next-trace.mjs && cross-env NEXT_DIST_DIR=.next next dev",
+    "clean:next": "node scripts/rm-next.mjs",
+    "clean:next-dev": "node scripts/rm-next-build.mjs",
+    "dev:fresh": "node scripts/rm-next-build.mjs && cross-env NEXT_DIST_DIR=.next-build next dev",
+    "build": "cross-env NEXT_DIST_DIR=.next-prod next build",
+    "start": "cross-env NEXT_DIST_DIR=.next-prod next start",
+    "build:dotnext": "cross-env NEXT_DIST_DIR=.next next build",
     "lint": "next lint"
   },
   "dependencies": {
@@ -24,6 +29,7 @@
     "zustand": "^4.5.0"
   },
   "devDependencies": {
+    "cross-env": "^7.0.3",
     "@types/node": "^20.14.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",

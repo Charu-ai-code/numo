@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import Link from "next/link";
 import {
   User,
   Globe,
@@ -14,6 +15,7 @@ import {
   LogOut,
   ChevronRight,
   Wallet,
+  RefreshCw,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { useProfile } from "@/lib/hooks/use-profile";
@@ -145,6 +147,77 @@ export default function SettingsPage() {
           onChange={(c) => updateProfile.mutate({ primary_currency: c })}
         />
       </Card>
+
+      {/* Income & remittance planning */}
+      <Card className="space-y-4">
+        <div className="flex items-center gap-3">
+          <Calendar className="w-5 h-5 text-muted" />
+          <div>
+            <p className="text-sm">Income &amp; home sends</p>
+            <p className="text-xs text-muted">
+              Used for “planned vs income,” coach/nudges, and Send Home goal defaults. Enter amounts in your primary currency ({profile.primary_currency}).
+            </p>
+          </div>
+        </div>
+        <Input
+          type="number"
+          inputMode="decimal"
+          min={0}
+          step="0.01"
+          label="Monthly income (after tax)"
+          placeholder="0.00"
+          className="font-number"
+          defaultValue={profile.monthly_income ?? ""}
+          key={`income-${profile.monthly_income ?? "empty"}`}
+          onBlur={(e) => {
+            const v = e.target.value.trim();
+            if (v === "") {
+              updateProfile.mutate({ monthly_income: null });
+              return;
+            }
+            const n = parseFloat(v);
+            if (!Number.isNaN(n) && n >= 0) {
+              updateProfile.mutate({ monthly_income: n });
+            }
+          }}
+        />
+        <Input
+          type="number"
+          inputMode="decimal"
+          min={0}
+          step="0.01"
+          label="Planned monthly remittance (optional)"
+          placeholder="e.g. amount you send home each month"
+          className="font-number"
+          defaultValue={profile.planned_monthly_remittance ?? ""}
+          key={`planrem-${profile.planned_monthly_remittance ?? "empty"}`}
+          onBlur={(e) => {
+            const v = e.target.value.trim();
+            if (v === "") {
+              updateProfile.mutate({ planned_monthly_remittance: null });
+              return;
+            }
+            const n = parseFloat(v);
+            if (!Number.isNaN(n) && n >= 0) {
+              updateProfile.mutate({ planned_monthly_remittance: n });
+            }
+          }}
+        />
+      </Card>
+
+      {/* Recurring & subscriptions */}
+      <Link href="/recurring">
+        <Card hover className="flex items-center justify-between cursor-pointer">
+          <div className="flex items-center gap-3">
+            <RefreshCw className="w-5 h-5 text-muted" />
+            <div>
+              <p className="text-sm">Recurring &amp; Subscriptions</p>
+              <p className="text-xs text-muted">Bills, fixed costs, and monthly commitments</p>
+            </div>
+          </div>
+          <ChevronRight className="w-4 h-4 text-muted" />
+        </Card>
+      </Link>
 
       {/* Default Account for Splits */}
       <Card className="space-y-3">

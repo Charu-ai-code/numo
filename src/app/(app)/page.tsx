@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -14,11 +15,19 @@ import {
   PieChart,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
-import { useAccounts } from "@/lib/hooks/use-accounts";
+import { useAccounts, useAllTransactionsLedger } from "@/lib/hooks/use-accounts";
+import {
+  computeNetWorthByCurrency,
+  computeRunningBalance,
+  getDueDateStatus,
+  dueUrgency,
+  type LedgerAccountRow,
+  type LedgerTransactionRow,
+} from "@/lib/account-ledger";
 import { useProfile } from "@/lib/hooks/use-profile";
 import { useCustomCategories } from "@/lib/hooks/use-categories";
 import { useAppStore } from "@/lib/stores/app-store";
-import { formatCurrency, daysLeftInMonth } from "@/lib/utils";
+import { formatCurrency, daysLeftInMonth, cn } from "@/lib/utils";
 import { looksLikeSettlementDescription } from "@/lib/splitwise-settlement";
 import {
   balancesFromManualLedger,
@@ -31,6 +40,21 @@ import {
   type Currency,
   type CustomCategory,
 } from "@/lib/constants";
+import {
+  aggregateExpenseByCategory,
+  computeBudgetProgress,
+  computeDailyBudgetNumber,
+  totalGoalsProgressThisMonth,
+  unbudgetedSpending,
+  isBudgetEligibleExpense,
+  type ExpenseRow,
+} from "@/lib/budget-engine";
+import { nextMonthStart } from "@/lib/monthly-planner";
+import {
+  buildSpendingHubItems,
+  upcomingWithinDays,
+  type SpendingRecurringHubRow,
+} from "@/lib/recurring-hub";
 import { Card } from "@/components/ui/card";
 import { ProgressBar } from "@/components/ui/progress-bar";
 import { CurrencyToggle } from "@/components/ui/currency-toggle";
@@ -111,6 +135,7 @@ export default function DashboardPage() {
   const supabase = createClient();
   const { isLoading: profileLoading } = useProfile();
   const { data: accounts, isLoading: accountsLoading } = useAccounts();
+  const { data: ledgerTxs, isLoading: ledgerLoading } = useAllTransactionsLedger();
   const { data: customCategories } = useCustomCategories();
   const profile = useAppStore((s) => s.profile);
   const viewCurrency = useAppStore((s) => s.viewCurrency);
@@ -191,23 +216,140 @@ export default function DashboardPage() {
     },
   });
 
-  const netWorth = useMemo(() => {
-    if (!accounts) return 0;
-    return accounts.reduce((sum: number, a: any) => sum + (a.initial_balance || 0), 0);
-  }, [accounts]);
+  const { data: goals } = useQuery({
+    queryKey: ["goals"],
+    queryFn: async () => {
+      const { data, error } = await supabase.from("savings_goals").select("*");
+      if (error) throw error;
+      return data;
+    },
+  });
+
+  const { data: goalContributionsMonth } = useQuery({
+    queryKey: ["goal-contributions-month-dash", monthStart],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("goal_contributions")
+        .select("goal_id, amount, date")
+        .gte("date", monthStart);
+      if (error) throw error;
+      return data;
+    },
+  });
+
+  const { data: remittancesMonth } = useQuery({
+    queryKey: ["remittances-month-dash", monthStart],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("remittances")
+        .select("*")
+        .gte("date", monthStart);
+      if (error) throw error;
+      return data;
+    },
+  });
+
+  const monthEndDash = nextMonthStart(monthStart);
+
+  const { data: recurringDash } = useQuery({
+    queryKey: ["recurring-expenses"],
+    queryFn: async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return [];
+      const { data, error } = await supabase
+        .from("recurring_expenses")
+        .select("*")
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .order("label");
+      if (error) throw error;
+      return data ?? [];
+    },
+  });
+
+  const { data: monthTxRecurringDash } = useQuery({
+    queryKey: ["dashboard-recurring-month-txs", monthStart],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("transactions")
+        .select("*")
+        .eq("type", "expense")
+        .gte("date", monthStart)
+        .lt("date", monthEndDash);
+      if (error) throw error;
+      return data ?? [];
+    },
+  });
+
+  const txsByAccountId = useMemo(() => {
+    const m = new Map<string, LedgerTransactionRow[]>();
+    if (!ledgerTxs) return m;
+    for (const row of ledgerTxs as any[]) {
+      const aid = row.account_id as string;
+      const t: LedgerTransactionRow = {
+        amount: row.amount,
+        type: row.type,
+        date: row.date,
+        created_at: row.created_at,
+      };
+      if (!m.has(aid)) m.set(aid, []);
+      m.get(aid)!.push(t);
+    }
+    return m;
+  }, [ledgerTxs]);
+
+  const netWorthByCurrency = useMemo(() => {
+    if (!accounts) return { USD: 0, INR: 0 } as Record<Currency, number>;
+    return computeNetWorthByCurrency(
+      accounts as LedgerAccountRow[],
+      txsByAccountId
+    );
+  }, [accounts, txsByAccountId]);
 
   const { monthIncome, monthExpenses } = useMemo(() => {
     if (!transactions) return { monthIncome: 0, monthExpenses: 0 };
     let income = 0;
     let expenses = 0;
     transactions.forEach((t: any) => {
-      if (t.date >= monthStart) {
-        if (t.type === "income") income += t.amount;
-        else expenses += t.amount;
-      }
+      if (t.date < monthStart) return;
+      if (t.type === "income") income += t.amount;
+      else if (t.type === "expense") expenses += t.amount;
     });
     return { monthIncome: income, monthExpenses: expenses };
   }, [transactions, monthStart]);
+
+  const creditCardDueAlerts = useMemo(() => {
+    if (!accounts) return [];
+    const list: {
+      id: string;
+      name: string;
+      currency: Currency;
+      owed: number;
+      status: NonNullable<ReturnType<typeof getDueDateStatus>>;
+      urgency: ReturnType<typeof dueUrgency>;
+    }[] = [];
+    for (const a of accounts as any[]) {
+      if (a.type !== "credit_card" || !a.payment_due_day) continue;
+      const txs = txsByAccountId.get(a.id) || [];
+      const owed = computeRunningBalance(a as LedgerAccountRow, txs);
+      const st = getDueDateStatus(a.payment_due_day, now);
+      if (!st) continue;
+      const urg = dueUrgency(st);
+      if (st.overdue || st.daysUntil <= 7) {
+        list.push({
+          id: a.id,
+          name: a.name,
+          currency: a.currency,
+          owed,
+          status: st,
+          urgency: urg,
+        });
+      }
+    }
+    return list;
+  }, [accounts, txsByAccountId, now]);
 
   const customExpenseSlugs = useMemo(
     () =>
@@ -266,15 +408,66 @@ export default function DashboardPage() {
     };
   }, [transactions, monthStart, customCategories, customExpenseSlugs]);
 
-  const budgetProgress = useMemo(() => {
-    if (!budgets || !transactions) return [];
-    return budgets.map((b: any) => {
-      const spent = transactions
-        .filter((t: any) => t.type === "expense" && t.category === b.category && t.date >= monthStart)
-        .reduce((s: number, t: any) => s + t.amount, 0);
-      return { ...b, spent };
-    });
-  }, [budgets, transactions, monthStart]);
+  const budgetSnapshot = useMemo(() => {
+    if (!transactions || !budgets) {
+      return {
+        progress: [] as { id: string; category: string; monthly_limit: number; currency: string; spent: number; spentSplit: number; spentPersonal: number; pct: number }[],
+        dailyPerDay: 0,
+        totalLimits: 0,
+        spentInBudgetCats: 0,
+        goalContrib: { contributed: 0, target: 0 },
+        unbudgeted: { total: 0, byCategory: [] as { category: string; amount: number }[] },
+      };
+    }
+    const expenseRows: ExpenseRow[] = transactions
+      .filter(
+        (t: any) =>
+          t.type === "expense" &&
+          t.date >= monthStart &&
+          isBudgetEligibleExpense(t.category)
+      )
+      .map((t: any) => ({
+        amount: Number(t.amount),
+        category: t.category,
+        currency: t.currency,
+        type: "expense" as const,
+        source: (t.source as "manual" | "split") || "manual",
+      }));
+    const byCat = aggregateExpenseByCategory(expenseRows);
+    const budgetRows = budgets.map((b: any) => ({
+      id: b.id,
+      category: b.category,
+      monthly_limit: Number(b.monthly_limit),
+      currency: b.currency as Currency,
+    }));
+    const progress = computeBudgetProgress(budgetRows, byCat);
+    const daily = computeDailyBudgetNumber(budgetRows, byCat);
+    const goalContrib = totalGoalsProgressThisMonth(
+      goals || [],
+      goalContributionsMonth || [],
+      remittancesMonth || [],
+      monthStart
+    );
+    const budgetedCategories = new Set(budgetRows.map((b) => b.category));
+    const unbudgeted = unbudgetedSpending(byCat, budgetedCategories);
+    return {
+      progress,
+      dailyPerDay: daily.perDay,
+      totalLimits: daily.totalLimits,
+      spentInBudgetCats: daily.spentInBudgetCategories,
+      goalContrib,
+      unbudgeted,
+    };
+  }, [
+    transactions,
+    budgets,
+    monthStart,
+    goals,
+    goalContributionsMonth,
+    remittancesMonth,
+  ]);
+
+  const budgetProgress = budgetSnapshot.progress;
 
   const splitSummary = useMemo(() => {
     if (!splitGroups || !splitExpenses || !profile) return null;
@@ -343,7 +536,26 @@ export default function DashboardPage() {
     return { monthlyShare, youOwe, owedToYou, peopleOweYou, youOwePeople };
   }, [splitGroups, splitExpenses, splitSettlements, profile, monthStart]);
 
-  const isLoading = profileLoading || accountsLoading;
+  const recurringDueSoon = useMemo(() => {
+    const refNow = new Date();
+    const items = buildSpendingHubItems(
+      (recurringDash || []) as SpendingRecurringHubRow[],
+      monthStart,
+      monthEndDash,
+      (monthTxRecurringDash || []).map((t: any) => ({
+        recurring_expense_id: t.recurring_expense_id,
+        date: t.date,
+        amount: Number(t.amount),
+        note: t.note,
+        source: t.source,
+      })),
+      new Map(),
+      refNow
+    );
+    return upcomingWithinDays(items, 3, refNow);
+  }, [recurringDash, monthStart, monthEndDash, monthTxRecurringDash]);
+
+  const isLoading = profileLoading || accountsLoading || ledgerLoading;
 
   if (isLoading) {
     return (
@@ -375,6 +587,9 @@ export default function DashboardPage() {
   }
 
   const curr = viewCurrency;
+  const netWorthPrimary = netWorthByCurrency[curr];
+  const netWorthAltKey: Currency = curr === "USD" ? "INR" : "USD";
+  const netWorthAlt = netWorthByCurrency[netWorthAltKey];
 
   const monthLabel = now.toLocaleDateString(undefined, {
     month: "long",
@@ -391,16 +606,190 @@ export default function DashboardPage() {
         <CurrencyToggle value={curr} onChange={setViewCurrency} />
       </div>
 
-      {/* Net Worth — hero */}
+      {recurringDueSoon.length > 0 && (
+        <Card className="border border-accent-blue/25 bg-accent-blue/[0.06] space-y-2">
+          <p className="text-sm font-medium text-white/90 flex items-center gap-2">
+            <span aria-hidden>🔄</span> Upcoming recurring
+          </p>
+          <ul className="text-sm text-muted space-y-1">
+            {recurringDueSoon.map((it) => (
+              <li key={it.re.id}>
+                {it.re.label}{" "}
+                <span className="font-number text-white/80">
+                  {formatCurrency(Number(it.re.expected_amount), it.re.currency as Currency)}
+                </span>
+                {it.daysUntil === 0
+                  ? " · due today"
+                  : it.daysUntil != null
+                    ? ` · due in ${it.daysUntil} day(s)`
+                    : null}
+              </li>
+            ))}
+          </ul>
+          <Link
+            href="/recurring"
+            className="text-xs text-accent-blue font-medium inline-block"
+          >
+            View all recurring →
+          </Link>
+        </Card>
+      )}
+
+      {/* Month snapshot — hero: budgets, goals, daily, radar */}
+      {(budgetSnapshot.totalLimits > 0 ||
+        budgetSnapshot.goalContrib.target > 0) && (
+        <Card className="relative overflow-hidden border border-white/[0.1] bg-gradient-to-br from-accent-green/[0.07] via-white/[0.04] to-transparent p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.04)_inset]">
+          <p className="text-[11px] text-muted uppercase tracking-[0.12em] font-medium">
+            This month
+          </p>
+          <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {budgetSnapshot.totalLimits > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs text-muted">Spending vs budgeted</p>
+                <p className="font-number text-xl font-semibold tabular-nums">
+                  {formatCurrency(budgetSnapshot.spentInBudgetCats, curr)}{" "}
+                  <span className="text-white/35 font-normal">of</span>{" "}
+                  {formatCurrency(budgetSnapshot.totalLimits, curr)}
+                </p>
+                <ProgressBar
+                  value={budgetSnapshot.spentInBudgetCats}
+                  max={Math.max(budgetSnapshot.totalLimits, 1)}
+                />
+              </div>
+            )}
+            {budgetSnapshot.goalContrib.target > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs text-muted">Goals (recurring)</p>
+                <p className="font-number text-xl font-semibold tabular-nums">
+                  {formatCurrency(budgetSnapshot.goalContrib.contributed, curr)}{" "}
+                  <span className="text-white/35 font-normal">of</span>{" "}
+                  {formatCurrency(budgetSnapshot.goalContrib.target, curr)}
+                </p>
+                <ProgressBar
+                  value={budgetSnapshot.goalContrib.contributed}
+                  max={Math.max(budgetSnapshot.goalContrib.target, 1)}
+                />
+              </div>
+            )}
+          </div>
+          {budgetSnapshot.totalLimits > 0 && budgetSnapshot.dailyPerDay > 0 && (
+            <div className="mt-5 pt-4 border-t border-white/[0.06]">
+              <p className="text-[11px] text-muted uppercase tracking-wide mb-1">
+                Daily allowance (budget categories)
+              </p>
+              <p className="font-number text-2xl sm:text-3xl font-bold text-accent-green tabular-nums">
+                {formatCurrency(budgetSnapshot.dailyPerDay, curr)}
+                <span className="text-sm font-normal text-muted"> / day</span>
+              </p>
+              <p className="text-[11px] text-muted mt-1">
+                {daysLeftInMonth()} days left ·{" "}
+                {budgetSnapshot.unbudgeted.total > 0
+                  ? `${formatCurrency(budgetSnapshot.unbudgeted.total, curr)} unbudgeted`
+                  : "No unbudgeted category spend"}
+              </p>
+            </div>
+          )}
+          {budgetProgress.length > 0 && (
+            <div className="mt-5 pt-4 border-t border-white/[0.06]">
+              <p className="text-[11px] text-muted uppercase tracking-wide mb-3">
+                Budget radar
+              </p>
+              <div className="flex flex-wrap gap-x-3 gap-y-2">
+                {budgetProgress.slice(0, 10).map((b: any) => {
+                  const pct =
+                    b.pct ??
+                    (b.monthly_limit > 0
+                      ? (b.spent / b.monthly_limit) * 100
+                      : 0);
+                  const radarBg =
+                    pct >= 100
+                      ? "bg-accent-coral"
+                      : pct >= 80
+                        ? "bg-accent-amber"
+                        : "bg-accent-green";
+                  return (
+                    <div
+                      key={b.id}
+                      className="flex items-center gap-1.5 min-w-0 max-w-[140px]"
+                    >
+                      <span
+                        className={cn("w-2 h-2 rounded-full shrink-0", radarBg)}
+                      />
+                      <span className="text-[11px] text-white/80 truncate">
+                        {getCategoryLabel(b.category, customCategories)}
+                      </span>
+                      <span className="text-[10px] text-muted font-number shrink-0">
+                        {Math.round(pct)}%
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          <div className="absolute -right-8 -bottom-12 w-36 h-36 rounded-full bg-accent-green/5 blur-3xl pointer-events-none" />
+        </Card>
+      )}
+
+      {/* Net worth (assets − credit card owed, per currency) */}
       <div className="relative overflow-hidden rounded-2xl border border-white/[0.1] bg-gradient-to-br from-white/[0.08] via-white/[0.03] to-transparent p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.04)_inset]">
         <p className="text-[11px] text-muted uppercase tracking-[0.12em] font-medium">
           Net worth
         </p>
-        <p className="font-number text-3xl sm:text-4xl font-bold tracking-tight mt-1 text-white">
-          {formatCurrency(netWorth, curr)}
+        <p className="text-[11px] text-muted mt-1">Banks + wallets + crypto − cards owed</p>
+        <p className="font-number text-2xl sm:text-3xl font-bold tracking-tight mt-1 text-white">
+          {formatCurrency(netWorthPrimary, curr)}
         </p>
+        {Math.abs(netWorthAlt) > 0.005 && (
+          <p className="font-number text-sm text-muted mt-1">
+            {formatCurrency(netWorthAlt, netWorthAltKey, true)}
+          </p>
+        )}
         <div className="absolute -right-6 -bottom-10 w-32 h-32 rounded-full bg-accent-green/5 blur-3xl pointer-events-none" />
       </div>
+
+      {creditCardDueAlerts.length > 0 && (
+        <div className="space-y-2">
+          {creditCardDueAlerts.map((c) => (
+            <Card
+              key={c.id}
+              className={cn(
+                "flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border",
+                c.urgency === "overdue" || c.urgency === "critical"
+                  ? "border-accent-coral/40 bg-accent-coral/[0.06]"
+                  : "border-accent-amber/25 bg-accent-amber/[0.05]"
+              )}
+            >
+              <div>
+                <p className="text-sm font-medium flex items-center gap-2">
+                  <span>💳</span> {c.name}
+                  {c.urgency === "overdue" && (
+                    <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-accent-coral/20 text-accent-coral font-semibold">
+                      Overdue
+                    </span>
+                  )}
+                </p>
+                <p className="text-xs text-muted mt-0.5">
+                  Owed {formatCurrency(c.owed, c.currency)}
+                  {c.status.overdue
+                    ? ` · was due ${c.status.nextDue.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`
+                    : c.status.daysUntil === 0
+                      ? " · due today"
+                      : ` · due in ${c.status.daysUntil} day${c.status.daysUntil === 1 ? "" : "s"}`}
+                </p>
+              </div>
+              <Button
+                size="sm"
+                variant="secondary"
+                className="shrink-0"
+                onClick={() => router.push(`/accounts/${c.id}?pay=1`)}
+              >
+                Pay card
+              </Button>
+            </Card>
+          ))}
+        </div>
+      )}
 
       {/* Cash Flow — single card */}
       <Card className="p-0 overflow-hidden border border-white/[0.08]">
@@ -480,22 +869,35 @@ export default function DashboardPage() {
           Accounts
         </p>
         <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
-          {accounts.map((a: any) => (
-            <button
-              key={a.id}
-              type="button"
-              onClick={() => router.push(`/accounts/${a.id}`)}
-              className="group flex flex-col items-stretch gap-1 px-4 py-2.5 min-w-[120px] rounded-2xl border border-white/[0.08] bg-gradient-to-b from-white/[0.07] to-white/[0.02] hover:border-white/[0.14] hover:from-white/[0.09] transition-all shrink-0 text-left shadow-sm"
-            >
-              <span className="flex items-center gap-1.5 text-[11px] text-muted group-hover:text-white/70">
-                <Wallet className="w-3 h-3 opacity-70" />
-                <span className="truncate max-w-[7rem]">{a.name}</span>
-              </span>
-              <span className="font-number text-sm font-semibold text-white tabular-nums">
-                {formatCurrency(a.initial_balance || 0, a.currency, true)}
-              </span>
-            </button>
-          ))}
+          {accounts.map((a: any) => {
+            const bal = computeRunningBalance(
+              a as LedgerAccountRow,
+              txsByAccountId.get(a.id) || []
+            );
+            const isCC = a.type === "credit_card";
+            return (
+              <button
+                key={a.id}
+                type="button"
+                onClick={() => router.push(`/accounts/${a.id}`)}
+                className="group flex flex-col items-stretch gap-1 px-4 py-2.5 min-w-[120px] rounded-2xl border border-white/[0.08] bg-gradient-to-b from-white/[0.07] to-white/[0.02] hover:border-white/[0.14] hover:from-white/[0.09] transition-all shrink-0 text-left shadow-sm"
+              >
+                <span className="flex items-center gap-1.5 text-[11px] text-muted group-hover:text-white/70">
+                  <Wallet className="w-3 h-3 opacity-70" />
+                  <span className="truncate max-w-[7rem]">{a.name}</span>
+                </span>
+                <span
+                  className={cn(
+                    "font-number text-sm font-semibold tabular-nums",
+                    isCC ? "text-accent-coral" : "text-white"
+                  )}
+                >
+                  {isCC && <span className="text-[10px] text-muted font-normal mr-1">Owed</span>}
+                  {formatCurrency(bal, a.currency, true)}
+                </span>
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -547,15 +949,26 @@ export default function DashboardPage() {
             Budget progress
           </p>
           {budgetProgress.map((b: any) => {
-            const pct = b.monthly_limit > 0 ? (b.spent / b.monthly_limit) * 100 : 0;
+            const pct = b.pct ?? (b.monthly_limit > 0 ? (b.spent / b.monthly_limit) * 100 : 0);
+            const radarBg =
+              pct >= 100 ? "bg-accent-coral" : pct >= 80 ? "bg-accent-amber" : "bg-accent-green";
             return (
               <div key={b.id} className="space-y-1.5">
-                <div className="flex justify-between text-sm">
-                  <span>{getCategoryLabel(b.category, customCategories)}</span>
+                <div className="flex justify-between text-sm items-center gap-2">
+                  <span className="flex items-center gap-2">
+                    <span className={cn("w-2 h-2 rounded-full shrink-0", radarBg)} />
+                    {getCategoryLabel(b.category, customCategories)}
+                  </span>
                   <span className="font-number text-xs text-muted">
                     {formatCurrency(b.spent, b.currency)} / {formatCurrency(b.monthly_limit, b.currency)}
                   </span>
                 </div>
+                {(b.spentSplit > 0 || b.spentPersonal > 0) && (
+                  <p className="text-[10px] text-muted pl-4">
+                    Split {formatCurrency(b.spentSplit, b.currency)} · Personal{" "}
+                    {formatCurrency(b.spentPersonal, b.currency)}
+                  </p>
+                )}
                 <ProgressBar value={b.spent} max={b.monthly_limit} />
                 {pct >= 100 && (
                   <p className="text-xs text-accent-coral">Exceeded — maybe cut back next week?</p>

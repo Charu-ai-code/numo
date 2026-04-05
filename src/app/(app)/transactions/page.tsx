@@ -4,6 +4,7 @@ import { useState, useMemo, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Search, Receipt, Plus, Check, Trash2, Sparkles, Undo2, Calendar, Tag,
+  ArrowLeftRight, RefreshCw,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
@@ -17,11 +18,20 @@ import {
   getCategoryIcon,
   getCategoryColor,
   type Currency,
-  type TransactionType,
   type CustomCategory,
 } from "@/lib/constants";
 import { formatCurrency, formatDateShort, cn } from "@/lib/utils";
 import { isUnmappedCategory } from "@/lib/smart-categorize";
+import { isBudgetEligibleExpense } from "@/lib/budget-engine";
+import { isTransferType } from "@/lib/account-ledger";
+import { createPairedTransfer } from "@/lib/create-transfer";
+import { currentMonthStart } from "@/lib/monthly-planner";
+import {
+  monthlyRecurringReminderTemplates,
+  recurrenceLabel,
+  type RecurringTxLike,
+} from "@/lib/recurring-reminders";
+import { syncTransactionRecurring } from "@/lib/recurring-expense-sync";
 import { Card } from "@/components/ui/card";
 import { Chip } from "@/components/ui/chip";
 import { FAB } from "@/components/ui/fab";
@@ -37,6 +47,10 @@ import { CategoryPicker, CategoryIcon } from "@/components/ui/category-picker";
 import { CreateCategoryModal } from "@/components/ui/create-category-modal";
 
 type SourceFilter = "all" | "manual" | "split";
+
+type TxListFilter = "all" | "expense" | "income" | "transfers";
+
+type AddFlowType = "expense" | "income" | "transfer";
 
 function monthKeyFromDate(dateStr: string): string {
   return dateStr.slice(0, 7);
@@ -63,7 +77,7 @@ export default function TransactionsPage() {
 
   const [showAdd, setShowAdd] = useState(false);
   const [search, setSearch] = useState("");
-  const [filterType, setFilterType] = useState<"all" | TransactionType>("all");
+  const [filterType, setFilterType] = useState<TxListFilter>("all");
   const [filterSource, setFilterSource] = useState<SourceFilter>("all");
   /** `"all"` or `YYYY-MM` */
   const [filterMonth, setFilterMonth] = useState<string>("all");
@@ -73,7 +87,7 @@ export default function TransactionsPage() {
   // Add form state
   const [amount, setAmount] = useState("");
   const [currency, setCurrency] = useState<Currency>(profile?.primary_currency || "USD");
-  const [txType, setTxType] = useState<TransactionType>("expense");
+  const [txType, setTxType] = useState<AddFlowType>("expense");
   const [accountId, setAccountId] = useState("");
   const [category, setCategory] = useState("");
   const [note, setNote] = useState("");
@@ -81,12 +95,15 @@ export default function TransactionsPage() {
   const [isRecurring, setIsRecurring] = useState(false);
   const [recurrence, setRecurrence] = useState<string>("monthly");
   const [formError, setFormError] = useState("");
+  const [transferFromId, setTransferFromId] = useState("");
+  const [transferToId, setTransferToId] = useState("");
+  const [transferLoading, setTransferLoading] = useState(false);
 
   // Edit state
   const [editingTx, setEditingTx] = useState<any>(null);
   const [editAmount, setEditAmount] = useState("");
   const [editCurrency, setEditCurrency] = useState<Currency>("USD");
-  const [editType, setEditType] = useState<TransactionType>("expense");
+  const [editType, setEditType] = useState<"expense" | "income">("expense");
   const [editAccountId, setEditAccountId] = useState("");
   const [editCategory, setEditCategory] = useState("");
   const [editNote, setEditNote] = useState("");
@@ -94,6 +111,11 @@ export default function TransactionsPage() {
   const [editRecurring, setEditRecurring] = useState(false);
   const [editRecurrence, setEditRecurrence] = useState("monthly");
   const [editError, setEditError] = useState("");
+  const [deletePrompt, setDeletePrompt] = useState<{
+    id: string;
+    recurring_expense_id?: string | null;
+    is_recurring?: boolean | null;
+  } | null>(null);
 
   // Category override modal state
   const [overrideTx, setOverrideTx] = useState<any>(null);
@@ -125,6 +147,44 @@ export default function TransactionsPage() {
     },
   });
 
+  const { data: budgets } = useQuery({
+    queryKey: ["budgets"],
+    queryFn: async () => {
+      const { data, error } = await supabase.from("budgets").select("*");
+      if (error) throw error;
+      return data;
+    },
+  });
+
+  const spentByCategoryMonth = useMemo(() => {
+    const map = new Map<string, number>();
+    if (!transactions) return map;
+    transactions.forEach((t: any) => {
+      if (t.type !== "expense" || !isBudgetEligibleExpense(t.category)) return;
+      const m = `${t.date.slice(0, 7)}-01`;
+      const k = `${t.category}::${m}`;
+      map.set(k, (map.get(k) || 0) + Number(t.amount));
+    });
+    return map;
+  }, [transactions]);
+
+  function budgetPercentForTx(t: any): number | null {
+    if (t.type !== "expense" || !budgets?.length) return null;
+    const b = budgets.find((x: any) => x.category === t.category);
+    if (!b || !b.monthly_limit) return null;
+    const m = `${t.date.slice(0, 7)}-01`;
+    const spent = spentByCategoryMonth.get(`${t.category}::${m}`) || 0;
+    return Math.min(999, (spent / Number(b.monthly_limit)) * 100);
+  }
+
+  /** This transaction alone as % of monthly budget cap (MVP: same currency as budget row). */
+  function txShareOfMonthlyBudget(t: any): number | null {
+    if (t.type !== "expense" || !budgets?.length) return null;
+    const b = budgets.find((x: any) => x.category === t.category);
+    if (!b || !b.monthly_limit) return null;
+    return Math.min(999, (Number(t.amount) / Number(b.monthly_limit)) * 100);
+  }
+
   const addTx = useMutation({
     mutationFn: async (tx: any) => {
       const { data: { user } } = await supabase.auth.getUser();
@@ -140,6 +200,8 @@ export default function TransactionsPage() {
       qc.invalidateQueries({ queryKey: ["transactions"] });
       qc.invalidateQueries({ queryKey: ["accounts"] });
       qc.invalidateQueries({ queryKey: ["account-balance"] });
+      qc.invalidateQueries({ queryKey: ["transactions-ledger"] });
+      qc.invalidateQueries({ queryKey: ["recurring-expenses"] });
     },
   });
 
@@ -155,20 +217,78 @@ export default function TransactionsPage() {
       qc.invalidateQueries({ queryKey: ["transactions"] });
       qc.invalidateQueries({ queryKey: ["accounts"] });
       qc.invalidateQueries({ queryKey: ["account-balance"] });
+      qc.invalidateQueries({ queryKey: ["transactions-ledger"] });
+      qc.invalidateQueries({ queryKey: ["recurring-expenses"] });
     },
   });
 
   const deleteTx = useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await supabase.from("transactions").delete().eq("id", id);
-      if (error) throw error;
+      const { data: row } = await supabase
+        .from("transactions")
+        .select("linked_transfer_id")
+        .eq("id", id)
+        .maybeSingle();
+      const linked = row?.linked_transfer_id as string | null | undefined;
+      const ids = [id, linked].filter(Boolean) as string[];
+      if (ids.length > 0) {
+        const { error } = await supabase.from("transactions").delete().in("id", ids);
+        if (error) throw error;
+      }
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["transactions"] });
       qc.invalidateQueries({ queryKey: ["accounts"] });
       qc.invalidateQueries({ queryKey: ["account-balance"] });
+      qc.invalidateQueries({ queryKey: ["transactions-ledger"] });
+      qc.invalidateQueries({ queryKey: ["recurring-expenses"] });
     },
   });
+
+  async function syncRecurringForTransaction(
+    transactionId: string
+  ): Promise<{ ok: boolean; error?: string }> {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user?.id) {
+      return { ok: false, error: "Not signed in" };
+    }
+    const result = await syncTransactionRecurring(supabase, user.id, transactionId);
+    qc.invalidateQueries({ queryKey: ["transactions"] });
+    qc.invalidateQueries({ queryKey: ["recurring-expenses"] });
+    return result;
+  }
+
+  async function executeDeleteChoice(stopRecurringSeries: boolean) {
+    if (!deletePrompt) return;
+    const { id, recurring_expense_id, is_recurring } = deletePrompt;
+    try {
+      if (stopRecurringSeries && (recurring_expense_id || is_recurring)) {
+        if (recurring_expense_id) {
+          await supabase
+            .from("recurring_expenses")
+            .update({
+              is_active: false,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", recurring_expense_id);
+        }
+        await supabase
+          .from("recurring_expenses")
+          .update({
+            is_active: false,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("template_transaction_id", id);
+      }
+      await deleteTx.mutateAsync(id);
+      setDeletePrompt(null);
+      setEditingTx(null);
+    } catch {
+      /* surfaced via mutation state if needed */
+    }
+  }
 
   const monthOptions = useMemo(() => {
     if (!transactions?.length) return [] as string[];
@@ -190,6 +310,7 @@ export default function TransactionsPage() {
   }, [filterType]);
 
   const categoryOptions = useMemo(() => {
+    if (filterType === "transfers") return [];
     const slugs = new Set<string>();
     if (filterType === "expense" || filterType === "all") {
       EXPENSE_CATEGORIES.forEach((c) => slugs.add(c.value));
@@ -220,13 +341,31 @@ export default function TransactionsPage() {
       if (filterMonth !== "all" && t.date && monthKeyFromDate(t.date) !== filterMonth) {
         return false;
       }
-      if (filterType !== "all" && t.type !== filterType) return false;
+      if (filterType === "transfers") {
+        if (!isTransferType(t.type)) return false;
+      } else if (filterType !== "all" && t.type !== filterType) return false;
       if (filterSource !== "all" && (t.source || "manual") !== filterSource) return false;
       if (categoryFilters.length > 0 && !categoryFilters.includes(t.category)) return false;
       if (search && !(t.note || "").toLowerCase().includes(search.toLowerCase())) return false;
       return true;
     });
   }, [transactions, filterMonth, filterType, filterSource, categoryFilters, search]);
+
+  function transferAccountsLine(t: any, all: any[]): string | null {
+    if (!isTransferType(t.type)) return null;
+    const other = all.find((u: any) => u.id === t.linked_transfer_id);
+    if (!other) return null;
+    const fromName =
+      t.type === "transfer_out"
+        ? (t.accounts as any)?.name
+        : (other.accounts as any)?.name;
+    const toName =
+      t.type === "transfer_out"
+        ? (other.accounts as any)?.name
+        : (t.accounts as any)?.name;
+    if (!fromName || !toName) return null;
+    return `${fromName} → ${toName}`;
+  }
 
   const grouped = useMemo(() => {
     const groups: Record<string, any[]> = {};
@@ -237,6 +376,26 @@ export default function TransactionsPage() {
     });
     return Object.entries(groups).sort(([a], [b]) => b.localeCompare(a));
   }, [filtered]);
+
+  const currentCalendarYm = currentMonthStart().slice(0, 7);
+
+  const recurringReminders = useMemo(() => {
+    if (!transactions?.length) return [];
+    if (filterMonth !== "all" && filterMonth !== currentCalendarYm) return [];
+    const rows: RecurringTxLike[] = (transactions as any[]).map((t) => ({
+      id: t.id,
+      type: t.type,
+      category: t.category,
+      account_id: t.account_id,
+      amount: Number(t.amount),
+      currency: t.currency,
+      date: t.date,
+      note: t.note,
+      is_recurring: t.is_recurring,
+      recurrence: t.recurrence,
+    }));
+    return monthlyRecurringReminderTemplates(rows, currentMonthStart());
+  }, [transactions, filterMonth, currentCalendarYm]);
 
   const customSlugSet = useMemo(
     () => new Set((customCategories || []).map((c) => c.slug)),
@@ -291,12 +450,60 @@ export default function TransactionsPage() {
   async function handleAdd(e: React.FormEvent) {
     e.preventDefault();
     setFormError("");
+    if (txType === "transfer") {
+      if (!transferFromId || !transferToId || transferFromId === transferToId) {
+        setFormError("Choose two different accounts");
+        return;
+      }
+      const fromA = accounts?.find((a: any) => a.id === transferFromId);
+      const toA = accounts?.find((a: any) => a.id === transferToId);
+      if (!fromA || !toA) {
+        setFormError("Invalid accounts");
+        return;
+      }
+      if (fromA.currency !== toA.currency) {
+        setFormError("Accounts must use the same currency");
+        return;
+      }
+      const numAmount = parseFloat(amount);
+      if (!numAmount || numAmount <= 0) {
+        setFormError("Amount must be greater than 0");
+        return;
+      }
+      setTransferLoading(true);
+      try {
+        const { error } = await createPairedTransfer(supabase, {
+          fromAccountId: transferFromId,
+          toAccountId: transferToId,
+          amount: numAmount,
+          currency: fromA.currency,
+          transferDate: date,
+          note: note.trim() || null,
+        });
+        if (error) throw error;
+        qc.invalidateQueries({ queryKey: ["transactions"] });
+        qc.invalidateQueries({ queryKey: ["accounts"] });
+        qc.invalidateQueries({ queryKey: ["account-balance"] });
+        qc.invalidateQueries({ queryKey: ["transactions-ledger"] });
+        setShowAdd(false);
+        setAmount("");
+        setNote("");
+        setTransferFromId("");
+        setTransferToId("");
+      } catch (err: any) {
+        setFormError(err.message || "Transfer failed");
+      } finally {
+        setTransferLoading(false);
+      }
+      return;
+    }
+
     const numAmount = parseFloat(amount);
     if (!numAmount || numAmount <= 0) { setFormError("Amount must be greater than 0"); return; }
     if (!category) { setFormError("Category is required"); return; }
     if (!accountId) { setFormError("Account is required"); return; }
     try {
-      await addTx.mutateAsync({
+      const row = await addTx.mutateAsync({
         amount: numAmount,
         currency,
         type: txType,
@@ -307,6 +514,13 @@ export default function TransactionsPage() {
         is_recurring: isRecurring,
         recurrence: isRecurring ? recurrence : null,
       });
+      if (row?.id) {
+        const syncRes = await syncRecurringForTransaction(row.id as string);
+        if (!syncRes.ok) {
+          setFormError(syncRes.error || "Could not link recurring expense.");
+          return;
+        }
+      }
       setShowAdd(false);
       setAmount(""); setNote(""); setCategory("");
     } catch (err: any) {
@@ -315,22 +529,24 @@ export default function TransactionsPage() {
   }
 
   function openEdit(t: any) {
+    setEditError("");
     setEditingTx(t);
+    if (isTransferType(t.type)) return;
     setEditAmount(String(t.amount));
     setEditCurrency(t.currency);
-    setEditType(t.type);
+    setEditType(t.type === "income" ? "income" : "expense");
     setEditAccountId(t.account_id);
     setEditCategory(t.category);
     setEditNote(t.note || "");
     setEditDate(t.date);
     setEditRecurring(t.is_recurring || false);
     setEditRecurrence(t.recurrence || "monthly");
-    setEditError("");
   }
 
   async function handleEditSave(e: React.FormEvent) {
     e.preventDefault();
     setEditError("");
+    if (editingTx && isTransferType(editingTx.type)) return;
     const numAmount = parseFloat(editAmount);
     if (!numAmount || numAmount <= 0) { setEditError("Amount must be greater than 0"); return; }
     if (!editCategory) { setEditError("Category is required"); return; }
@@ -350,6 +566,11 @@ export default function TransactionsPage() {
         is_recurring: editRecurring,
         recurrence: editRecurring ? editRecurrence : null,
       });
+      const syncRes = await syncRecurringForTransaction(editingTx.id as string);
+      if (!syncRes.ok) {
+        setEditError(syncRes.error || "Could not link recurring expense.");
+        return;
+      }
       if (editingTx.note && editingTx.category !== editCategory) {
         upsertMapping.mutate({ keyword: editingTx.note, category: editCategory });
       }
@@ -381,6 +602,20 @@ export default function TransactionsPage() {
         }
       },
     });
+  }
+
+  function openAddFromRecurringTemplate(tpl: RecurringTxLike) {
+    setFormError("");
+    setTxType(tpl.type === "income" ? "income" : "expense");
+    setAmount(String(tpl.amount));
+    setCurrency(tpl.currency as Currency);
+    setAccountId(tpl.account_id);
+    setCategory(tpl.category);
+    setNote((tpl.note || "").trim());
+    setDate(new Date().toISOString().slice(0, 10));
+    setIsRecurring(true);
+    setRecurrence(tpl.recurrence || "monthly");
+    setShowAdd(true);
   }
 
   if (isLoading) {
@@ -434,51 +669,102 @@ export default function TransactionsPage() {
         <Chip active={filterType === "all"} onClick={() => setFilterType("all")}>All</Chip>
         <Chip active={filterType === "expense"} onClick={() => setFilterType("expense")}>Expenses</Chip>
         <Chip active={filterType === "income"} onClick={() => setFilterType("income")}>Income</Chip>
+        <Chip active={filterType === "transfers"} onClick={() => setFilterType("transfers")}>Transfers</Chip>
         <div className="w-px bg-white/[0.08] mx-1" />
         <Chip active={filterSource === "all"} onClick={() => setFilterSource("all")}>All Sources</Chip>
         <Chip active={filterSource === "manual"} onClick={() => setFilterSource("manual")}>Manual</Chip>
         <Chip active={filterSource === "split"} onClick={() => setFilterSource("split")}>Split</Chip>
       </div>
 
-      <div className="space-y-1.5">
-        <div className="flex items-center gap-2 text-[11px] text-muted uppercase tracking-wide">
-          <Tag className="w-3.5 h-3.5 opacity-70" aria-hidden />
-          <span>Categories</span>
-          {categoryFilters.length > 0 && (
-            <span className="normal-case text-white/50">
-              ({categoryFilters.length} selected)
-            </span>
-          )}
-        </div>
-        <div
-          className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1"
-          role="group"
-          aria-label="Filter by category"
-        >
-          <Chip
-            active={categoryFilters.length === 0}
-            onClick={() => setCategoryFilters([])}
+      {filterType !== "transfers" && (
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2 text-[11px] text-muted uppercase tracking-wide">
+            <Tag className="w-3.5 h-3.5 opacity-70" aria-hidden />
+            <span>Categories</span>
+            {categoryFilters.length > 0 && (
+              <span className="normal-case text-white/50">
+                ({categoryFilters.length} selected)
+              </span>
+            )}
+          </div>
+          <div
+            className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1"
+            role="group"
+            aria-label="Filter by category"
           >
-            All categories
-          </Chip>
-          {categoryOptions.map(({ slug, label }) => {
-            const on = categoryFilters.includes(slug);
-            return (
-              <Chip
-                key={slug}
-                active={on}
-                onClick={() => {
-                  setCategoryFilters((prev) =>
-                    on ? prev.filter((s) => s !== slug) : [...prev, slug]
-                  );
-                }}
-              >
-                {label}
-              </Chip>
-            );
-          })}
+            <Chip
+              active={categoryFilters.length === 0}
+              onClick={() => setCategoryFilters([])}
+            >
+              All categories
+            </Chip>
+            {categoryOptions.map(({ slug, label }) => {
+              const on = categoryFilters.includes(slug);
+              return (
+                <Chip
+                  key={slug}
+                  active={on}
+                  onClick={() => {
+                    setCategoryFilters((prev) =>
+                      on ? prev.filter((s) => s !== slug) : [...prev, slug]
+                    );
+                  }}
+                >
+                  {label}
+                </Chip>
+              );
+            })}
+          </div>
         </div>
-      </div>
+      )}
+
+      {recurringReminders.length > 0 && (
+        <Card className="space-y-3 border border-accent-blue/20 bg-accent-blue/[0.05]">
+          <div className="flex items-start gap-2">
+            <RefreshCw className="w-4 h-4 text-accent-blue shrink-0 mt-0.5" />
+            <div className="min-w-0 space-y-1">
+              <p className="text-sm font-medium text-accent-blue">
+                Recurring reminders (this month)
+              </p>
+              <p className="text-xs text-muted leading-relaxed">
+                Numo does not auto-create future transactions. The recurring flag is saved on each
+                row so we can nudge you here. Use{" "}
+                <strong className="text-white/80">Log now</strong> to copy amounts and categories
+                for today&apos;s date.
+              </p>
+            </div>
+          </div>
+          <ul className="space-y-2">
+            {recurringReminders.map((tpl) => (
+              <li
+                key={`${tpl.type}-${tpl.category}-${tpl.account_id}`}
+                className="flex flex-wrap items-center justify-between gap-2 text-sm border-b border-white/[0.06] pb-2 last:border-0 last:pb-0"
+              >
+                <div className="min-w-0">
+                  <span className="text-white/90">
+                    {getCategoryLabel(tpl.category, customCategories)}
+                  </span>
+                  <span className="text-muted text-xs ml-2">
+                    {tpl.type === "income" ? "Income" : "Expense"}
+                  </span>
+                  <p className="text-xs text-muted font-number">
+                    {formatCurrency(tpl.amount, tpl.currency as Currency)} · last{" "}
+                    {formatDateShort(tpl.date)}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  type="button"
+                  onClick={() => openAddFromRecurringTemplate(tpl)}
+                >
+                  Log now
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
 
       {unmappedRemaining > 0 && (
         <Card className="flex items-center justify-between gap-3 py-3">
@@ -524,17 +810,27 @@ export default function TransactionsPage() {
               ? undefined
               : categoryFilters.length > 0
                 ? "Try different categories or clear filters."
-                : filterMonth !== "all"
-                  ? "Try another month or clear filters."
-                  : "Tap + to log your first transaction"
+                : filterType === "transfers"
+                  ? "No transfers match — try All, another month, or add a transfer from +."
+                  : filterMonth !== "all"
+                    ? "Try another month or clear filters."
+                    : "Tap + to log your first transaction"
           }
           actionLabel={
-            search || filterSource !== "all" || filterMonth !== "all" || categoryFilters.length > 0
+            search ||
+            filterSource !== "all" ||
+            filterMonth !== "all" ||
+            categoryFilters.length > 0 ||
+            filterType === "transfers"
               ? "Clear filters"
               : undefined
           }
           onAction={
-            search || filterSource !== "all" || filterMonth !== "all" || categoryFilters.length > 0
+            search ||
+            filterSource !== "all" ||
+            filterMonth !== "all" ||
+            categoryFilters.length > 0 ||
+            filterType === "transfers"
               ? () => {
                   setSearch("");
                   setFilterType("all");
@@ -554,31 +850,64 @@ export default function TransactionsPage() {
               </p>
               <div className="space-y-2">
                 {txns.map((t: any) => {
+                  const isTr = isTransferType(t.type);
                   const catLabel = getCategoryLabel(t.category, customCategories);
                   const catIcon = getCategoryIcon(t.category, customCategories);
                   const catColor = getCategoryColor(t.category, customCategories);
+                  const budgetPct = budgetPercentForTx(t);
+                  const txBudgetPct = txShareOfMonthlyBudget(t);
+                  const xferLine = isTr ? transferAccountsLine(t, transactions || []) : null;
 
                   return (
                     <Card key={t.id} className="flex items-center gap-3 py-3">
-                      {/* Category icon — tappable to open category picker modal */}
-                      <button
-                        onClick={(e) => { e.stopPropagation(); setOverrideTx(t); }}
-                        className={cn(
-                          "w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors hover:ring-2 hover:ring-accent-blue/30",
-                          catColor
-                            ? ""
-                            : t.type === "income" ? "bg-accent-green/10 text-accent-green" : "bg-accent-coral/10 text-accent-coral"
-                        )}
-                        style={catColor ? { backgroundColor: catColor + "22", color: catColor } : undefined}
-                        title="Change category"
-                      >
-                        <CategoryIcon name={catIcon} />
-                      </button>
+                      {isTr ? (
+                        <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 bg-accent-blue/15 text-accent-blue">
+                          <ArrowLeftRight className="w-4 h-4" />
+                        </div>
+                      ) : (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setOverrideTx(t); }}
+                          className={cn(
+                            "w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors hover:ring-2 hover:ring-accent-blue/30",
+                            catColor
+                              ? ""
+                              : t.type === "income" ? "bg-accent-green/10 text-accent-green" : "bg-accent-coral/10 text-accent-coral"
+                          )}
+                          style={catColor ? { backgroundColor: catColor + "22", color: catColor } : undefined}
+                          title="Change category"
+                        >
+                          <CategoryIcon name={catIcon} />
+                        </button>
+                      )}
 
                       <div className="flex-1 min-w-0" onClick={() => openEdit(t)} role="button" tabIndex={0}>
-                        <p className="text-sm truncate">{t.note || catLabel}</p>
+                        <p className="text-sm truncate">{isTr ? (xferLine || t.note || "Transfer") : (t.note || catLabel)}</p>
                         <div className="flex items-center gap-1.5 flex-wrap">
-                          <Badge>{(t as any).accounts?.name || "—"}</Badge>
+                          {!isTr && (
+                            <>
+                              <span className="text-[10px] text-muted truncate max-w-[40%]">
+                                {catLabel}
+                              </span>
+                              <span className="text-[10px] text-white/35">·</span>
+                              <Badge>{(t as any).accounts?.name || "—"}</Badge>
+                            </>
+                          )}
+                          {isTr && (
+                            <Badge variant="blue" className="border border-[#b0c6ff]/40 text-[#b0c6ff] bg-[#b0c6ff]/10">
+                              Transfer
+                            </Badge>
+                          )}
+                          {!isTr && (t.is_recurring || t.recurring_expense_id) && (
+                            <Badge
+                              variant="blue"
+                              className="border border-accent-blue/30 text-accent-blue/90 bg-accent-blue/10 gap-1"
+                            >
+                              <span aria-hidden>🔄</span>
+                              {t.is_recurring
+                                ? recurrenceLabel(t.recurrence)
+                                : "Fixed"}
+                            </Badge>
+                          )}
                           {t.source === "split" && t.split_expenses?.split_groups && (
                             <Badge
                               variant="blue"
@@ -591,18 +920,30 @@ export default function TransactionsPage() {
                               Split: {t.split_expenses.split_groups.name}
                             </Badge>
                           )}
+                          {!isTr && budgetPct !== null && (
+                            <span className="text-[10px] text-muted font-number">
+                              Month {Math.round(budgetPct)}% of {catLabel} cap
+                              {txBudgetPct !== null && (
+                                <> · This tx {Math.round(txBudgetPct)}%</>
+                              )}
+                            </span>
+                          )}
                         </div>
                       </div>
                       <p
                         className={cn(
                           "font-number text-sm font-semibold whitespace-nowrap",
-                          t.type === "income" ? "text-accent-green" : "text-accent-coral"
+                          isTr
+                            ? "text-white/90"
+                            : t.type === "income" ? "text-accent-green" : "text-accent-coral"
                         )}
                         onClick={() => openEdit(t)}
                         role="button"
                         tabIndex={0}
                       >
-                        {t.type === "income" ? "+" : "-"}{formatCurrency(t.amount, t.currency)}
+                        {isTr
+                          ? `${t.type === "transfer_out" ? "−" : "+"}${formatCurrency(t.amount, t.currency)}`
+                          : `${t.type === "income" ? "+" : "-"}${formatCurrency(t.amount, t.currency)}`}
                       </p>
                     </Card>
                   );
@@ -613,60 +954,108 @@ export default function TransactionsPage() {
         </div>
       )}
 
-      <FAB onClick={() => { setShowAdd(true); if (accounts?.length) setAccountId(accounts[0].id); }} />
+      <FAB
+        onClick={() => {
+          setShowAdd(true);
+          setTxType("expense");
+          if (accounts?.length) setAccountId(accounts[0].id);
+        }}
+      />
 
       {/* Add Transaction Modal */}
-      <Modal open={showAdd} onClose={() => setShowAdd(false)} title="Add Transaction">
+      <Modal open={showAdd} onClose={() => setShowAdd(false)} title="Add transaction">
         <form onSubmit={handleAdd} className="space-y-4">
-          <div className="flex gap-2">
-            <button type="button" onClick={() => { setTxType("expense"); setCategory(""); }} className={cn("flex-1 py-2 rounded-xl text-sm font-medium transition-all border", txType === "expense" ? "bg-accent-coral/15 border-accent-coral/30 text-accent-coral" : "border-white/[0.06] text-muted")}>Expense</button>
-            <button type="button" onClick={() => { setTxType("income"); setCategory(""); }} className={cn("flex-1 py-2 rounded-xl text-sm font-medium transition-all border", txType === "income" ? "bg-accent-green/15 border-accent-green/30 text-accent-green" : "border-white/[0.06] text-muted")}>Income</button>
+          <div className="flex gap-1.5 flex-wrap">
+            <button type="button" onClick={() => { setTxType("expense"); setCategory(""); }} className={cn("flex-1 min-w-[5.5rem] py-2 rounded-xl text-sm font-medium transition-all border", txType === "expense" ? "bg-accent-coral/15 border-accent-coral/30 text-accent-coral" : "border-white/[0.06] text-muted")}>Expense</button>
+            <button type="button" onClick={() => { setTxType("income"); setCategory(""); }} className={cn("flex-1 min-w-[5.5rem] py-2 rounded-xl text-sm font-medium transition-all border", txType === "income" ? "bg-accent-green/15 border-accent-green/30 text-accent-green" : "border-white/[0.06] text-muted")}>Income</button>
+            <button type="button" onClick={() => { setTxType("transfer"); setCategory(""); }} className={cn("flex-1 min-w-[5.5rem] py-2 rounded-xl text-sm font-medium transition-all border", txType === "transfer" ? "bg-accent-blue/15 border-accent-blue/30 text-accent-blue" : "border-white/[0.06] text-muted")}>Transfer</button>
           </div>
+
+          {txType === "transfer" ? (
+            <>
+              <div className="space-y-1.5">
+                <label className="block text-sm text-muted">From</label>
+                <select value={transferFromId} onChange={(e) => setTransferFromId(e.target.value)} className="w-full px-4 py-2.5 bg-surface border border-white/[0.08] rounded-xl text-sm text-white outline-none [&>option]:bg-surface [&>option]:text-white">
+                  <option value="">Select account</option>
+                  {accounts?.map((a: any) => (
+                    <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <label className="block text-sm text-muted">To</label>
+                <select value={transferToId} onChange={(e) => setTransferToId(e.target.value)} className="w-full px-4 py-2.5 bg-surface border border-white/[0.08] rounded-xl text-sm text-white outline-none [&>option]:bg-surface [&>option]:text-white">
+                  <option value="">Select account</option>
+                  {accounts?.map((a: any) => (
+                    <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>
+                  ))}
+                </select>
+              </div>
+              <p className="text-xs text-muted">Same currency only. Card payments: transfer from bank to credit card.</p>
+            </>
+          ) : (
+            <div className="space-y-1.5">
+              <label className="block text-sm text-muted">Account</label>
+              <select value={accountId} onChange={(e) => setAccountId(e.target.value)} className="w-full px-4 py-2.5 bg-surface border border-white/[0.08] rounded-xl text-sm text-white outline-none [&>option]:bg-surface [&>option]:text-white">
+                <option value="">Select account</option>
+                {accounts?.map((a: any) => <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>)}
+              </select>
+            </div>
+          )}
 
           <div className="flex gap-3 items-end">
             <div className="flex-1">
               <Input label="Amount" type="number" step="0.01" min="0" placeholder="0.00" value={amount} onChange={(e) => setAmount(e.target.value)} className="font-number text-lg" />
             </div>
-            <CurrencyToggle value={currency} onChange={setCurrency} />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="block text-sm text-muted">Account</label>
-            <select value={accountId} onChange={(e) => setAccountId(e.target.value)} className="w-full px-4 py-2.5 bg-surface border border-white/[0.08] rounded-xl text-sm text-white outline-none [&>option]:bg-surface [&>option]:text-white">
-              <option value="">Select account</option>
-              {accounts?.map((a: any) => <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>)}
-            </select>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="block text-sm text-muted">Category</label>
-            <CategoryPicker
-              value={category}
-              type={txType}
-              customCategories={customCategories}
-              onChange={setCategory}
-              onCreateNew={() => { setCreateCategoryContext("add"); setShowCreateCategory(true); }}
-            />
-          </div>
-
-          <Input label="Note (optional)" placeholder="What was this for?" value={note} onChange={(e) => setNote(e.target.value)} />
-          <Input label="Date" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
-
-          <div className="flex items-center gap-3">
-            <input type="checkbox" id="recurring" checked={isRecurring} onChange={(e) => setIsRecurring(e.target.checked)} className="accent-accent-green" />
-            <label htmlFor="recurring" className="text-sm text-muted">Recurring</label>
-            {isRecurring && (
-              <select value={recurrence} onChange={(e) => setRecurrence(e.target.value)} className="ml-auto px-3 py-1.5 bg-surface border border-white/[0.08] rounded-lg text-xs text-white outline-none [&>option]:bg-surface [&>option]:text-white">
-                <option value="daily">Daily</option>
-                <option value="weekly">Weekly</option>
-                <option value="biweekly">Biweekly</option>
-                <option value="monthly">Monthly</option>
-              </select>
+            {txType !== "transfer" && (
+              <CurrencyToggle value={currency} onChange={setCurrency} />
             )}
           </div>
 
+          {txType !== "transfer" && (
+            <div className="space-y-1.5">
+              <label className="block text-sm text-muted">Category</label>
+              <CategoryPicker
+                value={category}
+                type={txType === "income" ? "income" : "expense"}
+                customCategories={customCategories}
+                onChange={setCategory}
+                onCreateNew={() => { setCreateCategoryContext("add"); setShowCreateCategory(true); }}
+              />
+            </div>
+          )}
+
+          <Input label="Note (optional)" placeholder={txType === "transfer" ? "e.g. Credit card payment" : "What was this for?"} value={note} onChange={(e) => setNote(e.target.value)} />
+          <Input label="Date" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+
+          {txType !== "transfer" && (
+            <div className="flex items-center gap-3">
+              <input type="checkbox" id="recurring" checked={isRecurring} onChange={(e) => setIsRecurring(e.target.checked)} className="accent-accent-green" />
+              <label htmlFor="recurring" className="text-sm text-muted">Recurring</label>
+              {isRecurring && (
+                <select value={recurrence} onChange={(e) => setRecurrence(e.target.value)} className="ml-auto px-3 py-1.5 bg-surface border border-white/[0.08] rounded-lg text-xs text-white outline-none [&>option]:bg-surface [&>option]:text-white">
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="biweekly">Biweekly</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              )}
+            </div>
+          )}
+          {txType !== "transfer" && (
+            <p className="text-[11px] text-muted leading-relaxed -mt-2">
+              For expenses, recurring also creates a fixed-cost link for budgets (same note + category).{" "}
+              <strong className="text-white/70">Numo does not auto-post future rows</strong> — use the
+              reminders card or add a transaction each time. If &quot;Biweekly&quot; fails to save, run the
+              latest recurrence migration in Supabase (see repo{" "}
+              <span className="font-mono text-[10px] opacity-80">supabase/migrations</span>).
+            </p>
+          )}
+
           {formError && <p className="text-sm text-accent-coral">{formError}</p>}
-          <Button type="submit" className="w-full" loading={addTx.isPending}>Add Transaction</Button>
+          <Button type="submit" className="w-full" loading={addTx.isPending || transferLoading}>
+            {txType === "transfer" ? "Add transfer" : "Add transaction"}
+          </Button>
         </form>
       </Modal>
 
@@ -674,9 +1063,37 @@ export default function TransactionsPage() {
       <Modal
         open={!!editingTx}
         onClose={() => setEditingTx(null)}
-        title="Edit Transaction"
+        title={
+          editingTx && isTransferType(editingTx.type)
+            ? "Transfer"
+            : "Edit Transaction"
+        }
       >
-        {editingTx && (
+        {editingTx && isTransferType(editingTx.type) && (
+          <div className="space-y-4">
+            <p className="text-sm text-muted">
+              Transfers move money between your accounts. They don’t affect budgets. Delete once — we remove both legs.
+            </p>
+            <div className="flex gap-2">
+              <Button type="button" variant="secondary" className="flex-1" onClick={() => setEditingTx(null)}>Close</Button>
+              <Button
+                type="button"
+                variant="danger"
+                className="flex-1"
+                onClick={() => {
+                  if (confirm("Delete this transfer (both legs)?")) {
+                    deleteTx.mutate(editingTx.id);
+                    setEditingTx(null);
+                  }
+                }}
+              >
+                <Trash2 className="w-4 h-4 mr-1" /> Delete transfer
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {editingTx && !isTransferType(editingTx.type) && (
           <form onSubmit={handleEditSave} className="space-y-4">
             <div className="flex gap-2">
               <button type="button" onClick={() => { setEditType("expense"); setEditCategory(""); }} className={cn("flex-1 py-2 rounded-xl text-sm font-medium transition-all border", editType === "expense" ? "bg-accent-coral/15 border-accent-coral/30 text-accent-coral" : "border-white/[0.06] text-muted")}>Expense</button>
@@ -737,6 +1154,11 @@ export default function TransactionsPage() {
                 </select>
               )}
             </div>
+            <p className="text-[11px] text-muted leading-relaxed -mt-2">
+              For expenses, this links the row to fixed spending in budgets (not automatic future posts).
+              Monthly patterns can use{" "}
+              <strong className="text-white/70">Log now</strong> on the reminders card when due.
+            </p>
 
             {editError && <p className="text-sm text-accent-coral">{editError}</p>}
 
@@ -746,6 +1168,14 @@ export default function TransactionsPage() {
                 type="button"
                 variant="secondary"
                 onClick={() => {
+                  if (editingTx.is_recurring || editingTx.recurring_expense_id) {
+                    setDeletePrompt({
+                      id: editingTx.id,
+                      recurring_expense_id: editingTx.recurring_expense_id,
+                      is_recurring: editingTx.is_recurring,
+                    });
+                    return;
+                  }
                   if (confirm("Delete this transaction?")) {
                     deleteTx.mutate(editingTx.id);
                     setEditingTx(null);
@@ -858,13 +1288,67 @@ export default function TransactionsPage() {
         )}
       </Modal>
 
+      <Modal
+        open={!!deletePrompt}
+        onClose={() => setDeletePrompt(null)}
+        title="Delete transaction?"
+      >
+        {deletePrompt && (
+          <div className="space-y-4">
+            <p className="text-sm text-muted leading-relaxed">
+              This entry is tied to a recurring or fixed expense. Remove just this
+              log, or stop the recurring series so Numo won&apos;t expect it
+              again?
+            </p>
+            <div className="flex flex-col gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                className="w-full"
+                loading={deleteTx.isPending}
+                onClick={() => executeDeleteChoice(false)}
+              >
+                Delete this one only
+              </Button>
+              <Button
+                type="button"
+                variant="danger"
+                className="w-full"
+                loading={deleteTx.isPending}
+                onClick={() => executeDeleteChoice(true)}
+              >
+                Stop recurring &amp; delete
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                className="w-full text-muted"
+                onClick={() => setDeletePrompt(null)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
       {/* Create Custom Category Modal */}
       <CreateCategoryModal
         open={showCreateCategory}
         onClose={() => setShowCreateCategory(false)}
         onSave={handleCreateCategoryDone}
         loading={createCustomCategory.isPending}
-        type={createCategoryContext === "edit" ? editType : (overrideTx?.type || txType)}
+        type={
+          createCategoryContext === "edit"
+            ? editType
+            : overrideTx
+              ? overrideTx.type === "income"
+                ? "income"
+                : "expense"
+              : txType === "income"
+                ? "income"
+                : "expense"
+        }
       />
     </div>
   );

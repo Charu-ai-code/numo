@@ -7,6 +7,10 @@ import {
   isUnmappedCategory,
 } from "@/lib/smart-categorize";
 import { EXPENSE_CATEGORIES, INCOME_CATEGORIES } from "@/lib/constants";
+import {
+  INTERNAL_TRANSFER_CATEGORY,
+  isTransferType,
+} from "@/lib/account-ledger";
 
 export const dynamic = "force-dynamic";
 
@@ -85,6 +89,8 @@ export async function POST() {
     );
     for (const t of txs || []) {
       const tx = t as any;
+      if (isTransferType(tx.type)) continue;
+      if (tx.category === INTERNAL_TRANSFER_CATEGORY) continue;
       const kw = keywordFromNote(tx.note);
       if (!kw) continue;
       if (tx.type === "expense" && tx.category === "other_expense") continue;
@@ -102,6 +108,8 @@ export async function POST() {
     }[] = [];
     for (const t of txs || []) {
       const tx = t as any;
+      if (isTransferType(tx.type)) continue;
+      if (tx.category === INTERNAL_TRANSFER_CATEGORY) continue;
       if (!isUnmappedCategory(tx.type, tx.category, customSlugs)) continue;
       const note = tx.note || "";
       if (!note.trim()) continue;

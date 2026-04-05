@@ -5,6 +5,8 @@ import {
   isSplitwiseSettlementExpense,
   parseSplitwiseSettlements,
 } from "@/lib/splitwise-settlement";
+import { detectRecurringPatterns } from "@/lib/detect-recurring";
+import { upsertDetectedRecurringRows } from "@/lib/recurring-expense-sync";
 
 export const dynamic = "force-dynamic";
 
@@ -434,7 +436,7 @@ export async function POST() {
             }
           }
 
-          // Auto-create/update transaction for current user's share
+          // Auto-create/update one expense = user's Splitwise owed_share on default_account_id only (not the full merchant/card charge). Posting the full card amount would be a separate product/sync change.
           if (!defaultAccountId) continue;
 
           const currentUserData = (exp.users || []).find(
@@ -487,6 +489,42 @@ export async function POST() {
     // Apply saved category_mappings to any transactions still on default categories (silent)
     const mappingUpdates = await applyUserMappingsToTransactions(supabase, user.id);
 
+    /** Detect recurring Splitwise shares (rent, utilities, etc.) → recurring_expenses */
+    let recurring_from_split = 0;
+    try {
+      const since = new Date();
+      since.setMonth(since.getMonth() - 3);
+      const sinceStr = since.toISOString().slice(0, 10);
+      const { data: splitTxs } = await supabase
+        .from("transactions")
+        .select("id, date, amount, note, category, currency, source")
+        .eq("user_id", user.id)
+        .eq("type", "expense")
+        .eq("source", "split")
+        .gte("date", sinceStr);
+      const patterns = detectRecurringPatterns(
+        (splitTxs || []).map((t: any) => ({
+          id: t.id,
+          date: t.date,
+          amount: Number(t.amount),
+          note: t.note,
+          category: t.category,
+          currency: t.currency,
+          source: t.source,
+        })),
+        { sinceDate: sinceStr }
+      ).filter((p) => p.source === "splitwise");
+      if (patterns.length) {
+        recurring_from_split = await upsertDetectedRecurringRows(
+          supabase,
+          user.id,
+          patterns
+        );
+      }
+    } catch (e) {
+      console.warn("Splitwise recurring detection skipped:", e);
+    }
+
     // Step 4: Update last sync timestamp
     await supabase
       .from("profiles")
@@ -501,6 +539,7 @@ export async function POST() {
       transactions_created: transactionsCreated,
       settlements_synced: settlementsSynced,
       category_mapping_updates: mappingUpdates,
+      recurring_from_split,
     });
   } catch (err: any) {
     console.error("Splitwise sync error:", err);

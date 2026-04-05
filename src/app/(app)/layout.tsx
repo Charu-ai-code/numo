@@ -6,6 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard,
   ArrowLeftRight,
+  Landmark,
   PiggyBank,
   Users,
   MessageCircle,
@@ -17,6 +18,7 @@ import { useProfile } from "@/lib/hooks/use-profile";
 const navItems = [
   { href: "/", label: "Home", icon: LayoutDashboard },
   { href: "/transactions", label: "Transactions", icon: ArrowLeftRight },
+  { href: "/accounts", label: "Accounts", icon: Landmark },
   { href: "/budgets", label: "Budgets", icon: PiggyBank },
   { href: "/split", label: "Split", icon: Users },
   { href: "/coach", label: "Coach", icon: MessageCircle },
@@ -50,7 +52,9 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             const active =
               item.href === "/"
                 ? pathname === "/"
-                : pathname.startsWith(item.href);
+                : item.href === "/accounts"
+                  ? pathname === "/accounts" || pathname.startsWith("/accounts/")
+                  : pathname.startsWith(item.href);
             return (
               <Link
                 key={item.href}
@@ -100,7 +104,9 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           const active =
             item.href === "/"
               ? pathname === "/"
-              : pathname.startsWith(item.href);
+              : item.href === "/accounts"
+                ? pathname === "/accounts" || pathname.startsWith("/accounts/")
+                : pathname.startsWith(item.href);
           return (
             <Link
               key={item.href}
