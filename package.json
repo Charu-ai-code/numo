@@ -8,9 +8,11 @@
     "clean:next": "node scripts/rm-next.mjs",
     "clean:next-dev": "node scripts/rm-next-build.mjs",
     "dev:fresh": "node scripts/rm-next-build.mjs && cross-env NEXT_DIST_DIR=.next-build next dev",
-    "build": "cross-env NEXT_DIST_DIR=.next-prod next build",
-    "start": "cross-env NEXT_DIST_DIR=.next-prod next start",
-    "build:dotnext": "cross-env NEXT_DIST_DIR=.next next build",
+    "build": "next build",
+    "start": "next start",
+    "build:next-prod": "cross-env NEXT_DIST_DIR=.next-prod next build",
+    "start:next-prod": "cross-env NEXT_DIST_DIR=.next-prod next start",
+    "build:dotnext": "next build",
     "lint": "next lint"
   },
   "dependencies": {

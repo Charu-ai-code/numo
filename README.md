@@ -112,6 +112,14 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000).
 
+### Deployment (Vercel)
+
+Use the default **Build Command** `npm run build` and leave **Output Directory** empty (Next.js preset). The app writes build output to **`.next`**, which Vercel expects.
+
+If you previously set a custom output directory or `npm run build:dotnext` only to work around an old config, you can revert to defaults after pulling the latest `package.json`.
+
+On Windows, if you prefer a separate production output folder (e.g. trace lock issues), use `npm run build:next-prod` and `npm run start:next-prod` locally only—not on Vercel.
+
 ## Project Structure
 
 ```

@@ -1,8 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   experimental: {},
-  // Windows: avoid locked `.next/trace` by using alternate dirs from npm scripts:
-  // dev → .next-build, build/start → .next-prod. Override: NEXT_DIST_DIR=.next (see build:dotnext / dev:dotnext).
+  // Windows: avoid locked `.next/trace` during dev via NEXT_DIST_DIR=.next-build (npm run dev).
+  // Default build/start use `.next` (Vercel/CI). Optional: build:next-prod / start:next-prod → .next-prod.
   distDir: process.env.NEXT_DIST_DIR || ".next",
 };
 
