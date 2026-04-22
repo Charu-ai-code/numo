@@ -83,9 +83,24 @@ export function useCreateAccount() {
       const {
         data: { user },
       } = await supabase.auth.getUser();
+      // Only include columns we set — avoids "apr not in schema" on DBs that never ran the apr migration.
+      const row: Record<string, unknown> = {
+        name: account.name,
+        type: account.type,
+        currency: account.currency,
+        initial_balance: account.initial_balance,
+        user_id: user!.id,
+      };
+      if (account.type === "credit_card") {
+        row.credit_limit = account.credit_limit ?? null;
+        row.payment_due_day = account.payment_due_day ?? null;
+        if (account.apr != null && !Number.isNaN(account.apr)) {
+          row.apr = account.apr;
+        }
+      }
       const { data, error } = await supabase
         .from("accounts")
-        .insert({ ...account, user_id: user!.id })
+        .insert(row as any)
         .select()
         .single();
       if (error) throw error;

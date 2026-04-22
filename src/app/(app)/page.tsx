@@ -17,7 +17,6 @@ import {
 import { createClient } from "@/lib/supabase/client";
 import { useAccounts, useAllTransactionsLedger } from "@/lib/hooks/use-accounts";
 import {
-  computeNetWorthByCurrency,
   computeRunningBalance,
   getDueDateStatus,
   dueUrgency,
@@ -300,14 +299,6 @@ export default function DashboardPage() {
     return m;
   }, [ledgerTxs]);
 
-  const netWorthByCurrency = useMemo(() => {
-    if (!accounts) return { USD: 0, INR: 0 } as Record<Currency, number>;
-    return computeNetWorthByCurrency(
-      accounts as LedgerAccountRow[],
-      txsByAccountId
-    );
-  }, [accounts, txsByAccountId]);
-
   const { monthIncome, monthExpenses } = useMemo(() => {
     if (!transactions) return { monthIncome: 0, monthExpenses: 0 };
     let income = 0;
@@ -587,9 +578,6 @@ export default function DashboardPage() {
   }
 
   const curr = viewCurrency;
-  const netWorthPrimary = netWorthByCurrency[curr];
-  const netWorthAltKey: Currency = curr === "USD" ? "INR" : "USD";
-  const netWorthAlt = netWorthByCurrency[netWorthAltKey];
 
   const monthLabel = now.toLocaleDateString(undefined, {
     month: "long",
@@ -730,23 +718,6 @@ export default function DashboardPage() {
           <div className="absolute -right-8 -bottom-12 w-36 h-36 rounded-full bg-accent-green/5 blur-3xl pointer-events-none" />
         </Card>
       )}
-
-      {/* Net worth (assets − credit card owed, per currency) */}
-      <div className="relative overflow-hidden rounded-2xl border border-white/[0.1] bg-gradient-to-br from-white/[0.08] via-white/[0.03] to-transparent p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.04)_inset]">
-        <p className="text-[11px] text-muted uppercase tracking-[0.12em] font-medium">
-          Net worth
-        </p>
-        <p className="text-[11px] text-muted mt-1">Banks + wallets + crypto − cards owed</p>
-        <p className="font-number text-2xl sm:text-3xl font-bold tracking-tight mt-1 text-white">
-          {formatCurrency(netWorthPrimary, curr)}
-        </p>
-        {Math.abs(netWorthAlt) > 0.005 && (
-          <p className="font-number text-sm text-muted mt-1">
-            {formatCurrency(netWorthAlt, netWorthAltKey, true)}
-          </p>
-        )}
-        <div className="absolute -right-6 -bottom-10 w-32 h-32 rounded-full bg-accent-green/5 blur-3xl pointer-events-none" />
-      </div>
 
       {creditCardDueAlerts.length > 0 && (
         <div className="space-y-2">

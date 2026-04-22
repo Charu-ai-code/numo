@@ -195,9 +195,6 @@ export default function AccountsPage() {
         type,
         currency,
         initial_balance: parseFloat(initialBalance) || 0,
-        credit_limit: null,
-        payment_due_day: null,
-        apr: null,
       });
       setShowCreate(false);
       resetCreateForm();

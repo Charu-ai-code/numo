@@ -11,7 +11,9 @@ export async function GET(request: NextRequest) {
   const code = url.searchParams.get("code");
 
   if (!code) {
-    return NextResponse.redirect(new URL("/login", origin));
+    const u = new URL("/login", origin);
+    u.searchParams.set("auth_error", "oauth");
+    return NextResponse.redirect(u);
   }
 
   let redirectResponse = NextResponse.redirect(new URL("/", origin));
@@ -36,7 +38,9 @@ export async function GET(request: NextRequest) {
   const { error } = await supabase.auth.exchangeCodeForSession(code);
 
   if (error) {
-    return NextResponse.redirect(new URL("/login", origin));
+    const u = new URL("/login", origin);
+    u.searchParams.set("auth_error", "oauth");
+    return NextResponse.redirect(u);
   }
 
   const { data: profile } = await supabase

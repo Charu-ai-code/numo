@@ -53,7 +53,13 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(new URL("/login", request.url));
   }
 
-  if (user && isPublic) {
+  // Do not redirect away from /auth/callback: OAuth must reach the route handler to
+  // exchange ?code= for a session. A stale JWT here would skip exchange and break Google login.
+  if (
+    user &&
+    isPublic &&
+    !path.startsWith("/auth/callback")
+  ) {
     return NextResponse.redirect(new URL("/", request.url));
   }
 

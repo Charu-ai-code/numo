@@ -6,7 +6,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -23,6 +23,16 @@ export default function LoginPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("auth_error") === "oauth") {
+      setFormError(
+        "Google sign-in did not finish. Try again, or confirm Supabase URL settings match this site."
+      );
+      window.history.replaceState({}, "", "/login");
+    }
+  }, []);
 
   function validate(): boolean {
     const next: { email?: string; password?: string } = {};
